@@ -10,6 +10,7 @@ import rateLimit from 'express-rate-limit';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authMiddleware } from './middleware/auth.js';
 import { PrismaClient } from '@prisma/client';
+import { pool } from './db.js';
 
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
@@ -25,7 +26,12 @@ import notificationRoutes from './routes/notifications.js';
 import settingsRoutes from './routes/settings.js';
 import healthRoutes from './routes/health.js';
 
+const dbUrl = (process.env.DB_PASSWORD && process.env.DB_PASSWORD.trim() !== '')
+  ? `mysql://${encodeURIComponent(process.env.DB_USER || 'root')}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST || '127.0.0.1'}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || 'orims'}`
+  : process.env.DATABASE_URL;
+
 export const prisma = new PrismaClient({
+  ...(dbUrl ? { datasources: { db: { url: dbUrl } } } : {}),
   log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
 });
 
@@ -88,6 +94,7 @@ if (process.env.NODE_ENV !== 'test') {
 
 process.on('beforeExit', async () => {
   await prisma.$disconnect();
+  await pool.end();
 });
 
 export { app, server };
