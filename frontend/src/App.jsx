@@ -1,0 +1,102 @@
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import Layout from './components/Layout';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import Products from './pages/Products';
+import ProductDetail from './pages/ProductDetail';
+import Inventory from './pages/Inventory';
+import POS from './pages/POS';
+import Sales from './pages/Sales';
+import SaleDetail from './pages/SaleDetail';
+import Suppliers from './pages/Suppliers';
+import SupplierDetail from './pages/SupplierDetail';
+import PurchaseOrders from './pages/PurchaseOrders';
+import PurchaseOrderDetail from './pages/PurchaseOrderDetail';
+import Optimization from './pages/Optimization';
+import Reports from './pages/Reports';
+import Notifications from './pages/Notifications';
+import Settings from './pages/Settings';
+import Users from './pages/Users';
+
+function ProtectedRoute({ children, allowedRoles }) {
+  const { user, loading, hasRole } = useAuth();
+  
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent"></div>
+      </div>
+    );
+  }
+  
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  
+  if (allowedRoles && !hasRole(...allowedRoles)) {
+    return <Navigate to="/dashboard" replace />;
+  }
+  
+  return children;
+}
+
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="/*"
+        element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route path="dashboard" element={<Dashboard />} />
+        <Route path="products" element={<Products />} />
+        <Route path="products/:id" element={<ProductDetail />} />
+        <Route path="inventory" element={<Inventory />} />
+        <Route path="pos" element={<POS />} />
+        <Route path="sales" element={<Sales />} />
+        <Route path="sales/:id" element={<SaleDetail />} />
+        <Route path="suppliers" element={<Suppliers />} />
+        <Route path="suppliers/:id" element={<SupplierDetail />} />
+        <Route path="purchase-orders" element={<PurchaseOrders />} />
+        <Route path="purchase-orders/:id" element={<PurchaseOrderDetail />} />
+        <Route path="purchases" element={<Navigate to="/purchase-orders" replace />} />
+        <Route path="purchases/:id" element={<PurchaseOrderDetail />} />
+        <Route path="optimization" element={<Optimization />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="notifications" element={<Notifications />} />
+        <Route
+          path="settings"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <Settings />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="users"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN']}>
+              <Users />
+            </ProtectedRoute>
+          }
+        />
+      </Route>
+    </Routes>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
+  );
+}
+
+export default App;

@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: orims-mysql
+    environment:
+      MYSQL_DATABASE: orims
+      MYSQL_USER: orims_user
+      MYSQL_PASSWORD: orims_dev_password
+      MYSQL_ROOT_PASSWORD: orims_root_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-porims_root_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: orims-backend
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: mysql://orims_user:orims_dev_password@mysql:3306/orims
+      JWT_ACCESS_SECRET: dev-access-secret-change-in-production
+      JWT_REFRESH_SECRET: dev-refresh-secret-change-in-production
+      JWT_ACCESS_EXPIRY: 15m
+      JWT_REFRESH_EXPIRY: 7d
+      CORS_ORIGIN: http://localhost:5173
+      ML_SERVICE_URL: http://ml-service:8000
+      ML_SERVICE_API_KEY: dev-ml-api-key
+      TAX_RATE: 0.10
+    ports:
+      - "3001:3001"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: orims-frontend
+    environment:
+      NODE_ENV: development
+      VITE_API_URL: http://localhost:3001/api/v1
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile.dev
+    container_name: orims-ml
+    environment:
+      PYTHON_ENV: development
+      PORT: 8000
+      ML_API_KEY: dev-ml-api-key
+      MODEL_PATH: /app/models
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml-service:/app
+      - ml_models:/app/models
+
+volumes:
+  mysql_data:
+  ml_models:

@@ -1,0 +1,547 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  SALES_STAFF
+  INVENTORY_STAFF
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum SaleStatus {
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum MovementType {
+  SALE
+  PURCHASE_RECEIPT
+  ADJUSTMENT_INCREASE
+  ADJUSTMENT_DECREASE
+  RETURN_RESTOCK
+  RETURN_WRITE_OFF
+  DAMAGE
+  WASTAGE
+  TRANSFER_IN
+  TRANSFER_OUT
+}
+
+enum NotificationType {
+  LOW_STOCK
+  OUT_OF_STOCK
+  EXPIRY_WARNING
+  EXPIRY_EXPIRED
+  PURCHASE_ORDER_DUE
+  FORECAST_AVAILABLE
+}
+
+enum ForecastMethod {
+  MODEL
+  BASELINE_MOVING_AVERAGE
+  BASELINE_DAY_OF_WEEK
+  INSUFFICIENT_DATA
+  FALLBACK
+}
+
+enum RecommendationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CONVERTED_TO_PO
+}
+
+model User {
+  id           String     @id @default(uuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  role         UserRole
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([email])
+  @@index([status])
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products    Product[]
+}
+
+model Store {
+  id        String   @id @default(uuid())
+  name      String
+  location  String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventory          Inventory[]
+  purchaseOrders     PurchaseOrder[]
+  sales              Sale[]
+  inventoryPolicies  InventoryPolicy[]
+  productBatches     ProductBatch[]
+  forecasts          Forecast[]
+  recommendations    OptimizationRecommendation[]
+  notifications      Notification[]
+}
+
+model Product {
+  id            String   @id @default(uuid())
+  sku           String   @unique
+  barcode       String?  @unique
+  name          String
+  description   String?
+  categoryId    String?
+  category      Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  costPrice     Decimal  @db.Decimal(12, 4)
+  sellingPrice  Decimal  @db.Decimal(12, 4)
+  unitOfMeasure String   @default("EA")
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  inventory         Inventory[]
+  stockMovements    StockMovement[]   @relation("ProductStockMovements")
+  purchaseOrderItems PurchaseOrderItem[]
+  saleItems         SaleItem[]
+  productBatches    ProductBatch[]
+  supplierProducts  SupplierProduct[]
+  inventoryPolicies InventoryPolicy[]
+  forecasts         Forecast[]
+  recommendations   OptimizationRecommendation[]
+  purchaseReceiptItems PurchaseReceiptItem[] @relation("ProductPurchaseReceiptItems")
+  notifications     Notification[] @relation("ProductNotifications")
+
+  @@index([sku])
+  @@index([barcode])
+  @@index([categoryId])
+  @@index([active])
+}
+
+model Inventory {
+  id               String   @id @default(uuid())
+  storeId          String
+  store            Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantityOnHand   Int      @default(0)
+  reservedQuantity Int      @default(0)
+  version          Int      @default(1)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  stockMovements StockMovement[] @relation("InventoryStockMovements")
+
+  @@unique([storeId, productId])
+  @@index([storeId])
+  @@index([productId])
+}
+
+model StockMovement {
+  id              String       @id @default(uuid())
+  storeId         String
+  productId       String
+  inventoryId     String?
+  inventory       Inventory?   @relation("InventoryStockMovements", fields: [inventoryId], references: [id], onDelete: SetNull)
+  product         Product      @relation("ProductStockMovements", fields: [productId], references: [id], onDelete: Cascade)
+  movementType    MovementType
+  quantityDelta   Int
+  referenceType   String?
+  referenceId     String?
+  reason          String?
+  actorId         String?
+  createdAt       DateTime     @default(now())
+
+  @@index([storeId, productId, createdAt])
+  @@index([referenceType, referenceId])
+  @@index([movementType])
+}
+
+model InventoryPolicy {
+  id            String   @id @default(uuid())
+  storeId       String
+  store         Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  safetyStock   Int      @default(0)
+  serviceLevel  Float    @default(0.95)
+  reviewPeriod  Int      @default(7)
+  minLevel      Int?
+  maxLevel      Int?
+  policySource  String   @default("MANUAL")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([storeId, productId])
+  @@index([storeId])
+  @@index([productId])
+}
+
+model ProductBatch {
+  id              String    @id @default(uuid())
+  storeId         String
+  store           Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  batchNumber     String
+  expiryDate      DateTime
+  quantityOnHand  Int       @default(0)
+  supplierId      String?
+  supplier        Supplier? @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+  receivedAt      DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([storeId, productId, batchNumber])
+  @@index([storeId, productId])
+  @@index([expiryDate])
+  @@index([supplierId])
+}
+
+model Supplier {
+  id        String   @id @default(uuid())
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  notes     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  supplierProducts    SupplierProduct[]
+  purchaseOrders      PurchaseOrder[]
+  productBatches      ProductBatch[]
+
+  @@index([name])
+  @@index([active])
+}
+
+model SupplierProduct {
+  id               String   @id @default(uuid())
+  supplierId       String
+  supplier         Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  productId        String
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  leadTimeDays     Int      @default(7)
+  minOrderQty      Int      @default(1)
+  packMultiple     Int      @default(1)
+  unitCost         Decimal  @db.Decimal(12, 4)
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([supplierId, productId])
+  @@index([supplierId])
+  @@index([productId])
+}
+
+model PurchaseOrder {
+  id          String              @id @default(uuid())
+  supplierId  String
+  supplier    Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  storeId     String
+  store       Store               @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  status      PurchaseOrderStatus @default(DRAFT)
+  orderDate   DateTime            @default(now())
+  expectedDate DateTime?
+  createdBy   String
+  approvedBy  String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  items       PurchaseOrderItem[]
+  receipts    PurchaseReceipt[]
+  productBatches ProductBatch[]
+
+  @@index([supplierId])
+  @@index([storeId])
+  @@index([status])
+  @@index([orderDate])
+}
+
+model PurchaseOrderItem {
+  id              String   @id @default(uuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  orderedQty      Int
+  receivedQty     Int      @default(0)
+  unitCost        Decimal  @db.Decimal(12, 4)
+  taxRate         Decimal  @default(0) @db.Decimal(5, 4)
+  discount        Decimal  @default(0) @db.Decimal(12, 4)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  receiptItems    PurchaseReceiptItem[]
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+}
+
+model PurchaseReceipt {
+  id                    String   @id @default(uuid())
+  purchaseOrderId       String
+  purchaseOrder         PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  receiptReference      String   @unique
+  receivedBy            String
+  receivedAt            DateTime @default(now())
+  supplierDeliveryRef   String?
+  createdAt             DateTime @default(now())
+
+  items                 PurchaseReceiptItem[]
+
+  @@index([purchaseOrderId])
+  @@index([receivedAt])
+}
+
+model PurchaseReceiptItem {
+  id                 String   @id @default(uuid())
+  receiptId          String
+  receipt            PurchaseReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  purchaseOrderItemId String
+  purchaseOrderItem  PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
+  productId          String
+  product            Product  @relation("ProductPurchaseReceiptItems", fields: [productId], references: [id], onDelete: Restrict)
+  qtyReceived        Int
+  unitCost           Decimal  @db.Decimal(12, 4)
+  batchNumber        String?
+  batchExpiryDate    DateTime?
+  createdAt          DateTime @default(now())
+
+  @@index([receiptId])
+  @@index([purchaseOrderItemId])
+  @@index([productId])
+}
+
+model Sale {
+  id              String      @id @default(uuid())
+  storeId         String
+  store           Store       @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  receiptNumber   String      @unique
+  status          SaleStatus  @default(COMPLETED)
+  subtotal        Decimal     @db.Decimal(12, 4)
+  discountTotal   Decimal     @default(0) @db.Decimal(12, 4)
+  taxTotal        Decimal     @default(0) @db.Decimal(12, 4)
+  total           Decimal     @db.Decimal(12, 4)
+  paymentMethod   String?
+  paymentStatus   String?
+  idempotencyKey  String?     @unique
+  createdBy       String
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  items           SaleItem[]
+  returns         SaleReturn[]
+
+  @@index([storeId])
+  @@index([createdAt])
+  @@index([receiptNumber])
+  @@index([status])
+  @@index([idempotencyKey])
+}
+
+model SaleItem {
+  id            String   @id @default(uuid())
+  saleId        String
+  sale          Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  quantity      Int
+  unitPrice     Decimal  @db.Decimal(12, 4)
+  unitCost      Decimal  @db.Decimal(12, 4)
+  lineDiscount  Decimal  @default(0) @db.Decimal(12, 4)
+  taxRate       Decimal  @default(0) @db.Decimal(5, 4)
+  lineTotal     Decimal  @db.Decimal(12, 4)
+  createdAt     DateTime @default(now())
+
+  returnItems   SaleReturnItem[]
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model SaleReturn {
+  id            String   @id @default(uuid())
+  saleId        String
+  sale          Sale     @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  reason        String
+  processedBy   String
+  createdAt     DateTime @default(now())
+
+  items         SaleReturnItem[]
+
+  @@index([saleId])
+}
+
+model SaleReturnItem {
+  id              String   @id @default(uuid())
+  returnId        String
+  saleReturn      SaleReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleItemId      String
+  saleItem        SaleItem @relation(fields: [saleItemId], references: [id], onDelete: Restrict)
+  qtyReturned     Int
+  restockQty      Int      @default(0)
+  writeOffQty     Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  @@index([returnId])
+  @@index([saleItemId])
+}
+
+model Forecast {
+  id                String        @id @default(uuid())
+  storeId           String
+  store             Store         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  targetDate        DateTime
+  horizonDays       Int           @default(7)
+  runId             String
+  predictedDemand   Float
+  modelVersion      String
+  forecastMethod    ForecastMethod @default(MODEL)
+  generatedAt       DateTime      @default(now())
+  createdAt         DateTime      @default(now())
+
+  evaluations       ForecastEvaluation[]
+
+  @@unique([storeId, productId, targetDate, runId])
+  @@index([storeId, productId, targetDate])
+  @@index([runId])
+  @@index([modelVersion])
+  @@index([forecastMethod])
+}
+
+model ModelVersion {
+  id                 String   @id @default(uuid())
+  version            String   @unique
+  modelFamily        String
+  artifactRef        String
+  trainingStartDate  DateTime
+  trainingEndDate    DateTime
+  featureSchemaVersion String
+  metrics            Json
+  status             String   @default("ACTIVE")
+  createdAt          DateTime @default(now())
+
+  @@index([version])
+  @@index([status])
+}
+
+model ForecastEvaluation {
+  id              String   @id @default(uuid())
+  forecastId      String
+  forecast        Forecast @relation(fields: [forecastId], references: [id], onDelete: Cascade)
+  actualQty       Int
+  errorValue      Float
+  evaluatedAt     DateTime @default(now())
+
+  @@index([forecastId])
+  @@index([evaluatedAt])
+}
+
+model OptimizationRecommendation {
+  id                String              @id @default(uuid())
+  storeId           String
+  store             Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  forecastRunId     String?
+  calculatedAt      DateTime            @default(now())
+  onHandQty         Int
+  incomingQty       Int
+  committedQty      Int
+  safetyStock       Int
+  targetStock       Int
+  rawSuggestedQty   Int
+  finalSuggestedQty Int
+  constraintsApplied Json
+  explanation       String
+  modelVersion      String?
+  forecastMethod    ForecastMethod?
+  status            RecommendationStatus @default(PENDING)
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  reviewReason      String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([storeId, productId])
+  @@index([status])
+  @@index([calculatedAt])
+  @@index([forecastRunId])
+}
+
+model Notification {
+  id                String           @id @default(uuid())
+  storeId           String?
+  store             Store?           @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  productId         String?
+  product           Product?         @relation("ProductNotifications", fields: [productId], references: [id], onDelete: SetNull)
+  type              NotificationType
+  message           String
+  payload           Json?
+  status            String           @default("UNREAD")
+  deduplicationKey  String           @unique
+  readAt            DateTime?
+  createdAt         DateTime         @default(now())
+
+  @@index([storeId, status])
+  @@index([productId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id              String   @id @default(uuid())
+  actorId         String?
+  action          String
+  entityType      String
+  entityId        String
+  details         Json?
+  requestId       String?
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime @default(now())
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@index([action])
+}
