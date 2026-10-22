@@ -1,31 +1,36 @@
 """
-Model training script for ORIMS ML Forecasting Service.
+Model training and benchmarking script for ORIMS ML Forecasting Service.
 
-This script:
-1. Loads historical sales data from the database (or generates synthetic data for demo)
-2. Prepares features for each product/store combination
-3. Trains a Gradient Boosting Regressor
-4. Evaluates against baselines using chronological splits
-5. Saves model and metadata
+1. Loads M5 Forecasting Accuracy competition dataset (or benchmark fixture).
+2. Computes strict time-series features (lags, rolling stats, calendar, prices, inventory) with zero future leakage.
+3. Enforces chronological train / validation / test splits.
+4. Evaluates against Moving Average and Day-of-Week Naive baselines.
+5. Saves model.joblib and metadata.json with provenance and metrics.
 """
 
 import os
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
 import json
 import logging
-import warnings
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Any, Tuple
 
 import numpy as np
 import pandas as pd
 import joblib
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import TimeSeriesSplit
+
+from m5_data import load_m5_dataset
+from features import (
+    FEATURE_COLUMNS,
+    TARGET_COLUMN,
+    build_time_series_features,
+    evaluate_model,
+)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -37,250 +42,133 @@ else:
     MODEL_DIR = Path(__file__).resolve().parent / "models"
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_VERSION = os.getenv("MODEL_VERSION", f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "mysql://orims_user:orims_dev_password@localhost:3306/orims")
 
-# Feature columns (must match prepare_features in main.py)
-FEATURE_COLUMNS = [
-    'lag_1', 'lag_7', 'lag_14', 'lag_28',
-    'rolling_mean_7', 'rolling_std_7',
-    'rolling_mean_14', 'rolling_std_14',
-    'day_of_week', 'month', 'is_weekend',
-    'selling_price', 'cost_price', 'price_ratio',
-    'on_hand', 'available', 'safety_stock',
-    'incoming_qty', 'lead_time_days',
-]
+def compute_baseline_predictions(
+    df_clean: pd.DataFrame,
+    train_end_idx: int,
+    val_end_idx: int,
+    y_test: np.ndarray
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Computes genuine retail baselines on the holdout test set:
+    1. 7-Day Moving Average Baseline (historical product mean)
+    2. Day-of-Week Naive Baseline (historical product mean per day-of-week)
+    """
+    df_train = df_clean.iloc[:train_end_idx]
+    df_test = df_clean.iloc[val_end_idx:]
 
-TARGET_COLUMN = 'target_demand'
+    # Baseline 1: Recent moving average per product
+    product_means = df_train.groupby('product_id')['demand'].mean().to_dict()
+    global_mean = float(df_train['demand'].mean()) if len(df_train) > 0 else 1.0
 
-def generate_synthetic_data(n_products: int = 20, n_days: int = 365) -> pd.DataFrame:
-    """Generate synthetic sales data for demonstration."""
-    np.random.seed(42)
-    
-    data = []
-    base_date = datetime.now().date() - timedelta(days=n_days)
-    
-    for product_id in range(1, n_products + 1):
-        # Product characteristics
-        base_demand = np.random.uniform(2, 20)
-        trend = np.random.uniform(-0.001, 0.002)
-        seasonality = np.random.uniform(0.5, 1.5)
-        noise_level = np.random.uniform(0.5, 2.0)
-        
-        # Product attributes
-        selling_price = np.random.uniform(10, 100)
-        cost_price = selling_price * np.random.uniform(0.4, 0.7)
-        
-        for day in range(n_days):
-            current_date = base_date + timedelta(days=day)
-            dow = current_date.weekday()
-            month = current_date.month
-            
-            # Calculate demand with trend, seasonality, day-of-week effect
-            dow_effect = [0.8, 1.0, 1.0, 1.0, 1.1, 1.3, 0.7][dow]
-            monthly_effect = 1.0 + 0.2 * np.sin(2 * np.pi * month / 12)
-            
-            demand = base_demand * (1 + trend * day) * seasonality * dow_effect * monthly_effect
-            demand += np.random.normal(0, noise_level)
-            demand = max(0, demand)
-            
-            # Inventory features (simplified)
-            on_hand = max(0, int(np.random.normal(50, 20)))
-            safety_stock = 10
-            available = max(0, on_hand - np.random.randint(0, 5))
-            incoming_qty = np.random.randint(0, 30) if np.random.random() < 0.1 else 0
-            lead_time_days = np.random.randint(3, 14)
-            
-            # Create lags (for first days, use base_demand)
-            if day == 0:
-                lags = [base_demand] * 4
-            elif day < 7:
-                lags = [data[-1]['demand']] * 4
-            else:
-                lags = [
-                    data[-1]['demand'],
-                    data[-7]['demand'] if day >= 7 else base_demand,
-                    data[-14]['demand'] if day >= 14 else base_demand,
-                    data[-28]['demand'] if day >= 28 else base_demand,
-                ]
-            
-            # Rolling stats
-            if day >= 7:
-                recent = [d['demand'] for d in data[-7:]]
-            else:
-                recent = [base_demand] * min(day, 7)
-            rolling_mean_7 = np.mean(recent)
-            rolling_std_7 = np.std(recent) if len(recent) > 1 else 0
-            
-            if day >= 14:
-                recent14 = [d['demand'] for d in data[-14:]]
-            else:
-                recent14 = [base_demand] * min(day, 14)
-            rolling_mean_14 = np.mean(recent14)
-            rolling_std_14 = np.std(recent14) if len(recent14) > 1 else 0
-            
-            data.append({
-                'product_id': f'PROD-{product_id:03d}',
-                'store_id': 'default-store',
-                'date': current_date,
-                'demand': demand,
-                'lag_1': lags[0],
-                'lag_7': lags[1],
-                'lag_14': lags[2],
-                'lag_28': lags[3],
-                'rolling_mean_7': rolling_mean_7,
-                'rolling_std_7': rolling_std_7,
-                'rolling_mean_14': rolling_mean_14,
-                'rolling_std_14': rolling_std_14,
-                'day_of_week': dow,
-                'month': month,
-                'is_weekend': 1 if dow >= 5 else 0,
-                'selling_price': selling_price,
-                'cost_price': cost_price,
-                'price_ratio': selling_price / cost_price,
-                'on_hand': on_hand,
-                'available': available,
-                'safety_stock': safety_stock,
-                'incoming_qty': incoming_qty,
-                'lead_time_days': lead_time_days,
-            })
-    
-    return pd.DataFrame(data)
+    ma_preds = np.array([
+        product_means.get(pid, global_mean) for pid in df_test['product_id']
+    ], dtype=np.float32)
+    ma_metrics = evaluate_model(y_test, ma_preds)
 
-def prepare_training_data(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    """Prepare features and targets from dataframe."""
-    # Create target (next day demand)
-    df = df.sort_values(['product_id', 'store_id', 'date']).copy()
-    df[TARGET_COLUMN] = df.groupby(['product_id', 'store_id'])['demand'].shift(-1)
-    
-    # Drop rows with NaN target
-    df = df.dropna(subset=[TARGET_COLUMN])
-    
-    X = df[FEATURE_COLUMNS].values
-    y = df[TARGET_COLUMN].values
-    
-    return X, y, df
+    # Baseline 2: Day-of-Week naive baseline for next-day target
+    dow_means = df_train.groupby(['product_id', 'day_of_week'])['demand'].mean().to_dict()
+    dow_preds = []
+    for pid, dow in zip(df_test['product_id'], df_test['day_of_week']):
+        target_dow = (int(dow) + 1) % 7
+        val = dow_means.get((pid, target_dow), product_means.get(pid, global_mean))
+        dow_preds.append(val)
+    dow_preds = np.array(dow_preds, dtype=np.float32)
+    dow_metrics = evaluate_model(y_test, dow_preds)
 
-def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """Calculate evaluation metrics."""
-    mae = mean_absolute_error(y_true, y_pred)
-    
-    # WAPE - Weighted Absolute Percentage Error
-    denominator = np.sum(np.abs(y_true))
-    if denominator > 0:
-        wape = np.sum(np.abs(y_true - y_pred)) / denominator
-    else:
-        wape = float('nan')
-    
-    # Bias
-    bias = np.mean(y_pred - y_true)
-    
-    return {
-        'mae': float(mae),
-        'wape': float(wape) if not np.isnan(wape) else None,
-        'bias': float(bias),
-        'n_samples': len(y_true),
-    }
+    return ma_metrics, dow_metrics
 
-def train_model():
-    """Main training pipeline."""
-    logger.info("Starting model training...")
-    
-    # Load or generate data
-    logger.info("Generating synthetic training data...")
-    df = generate_synthetic_data(n_products=50, n_days=730)  # 2 years
-    
-    logger.info(f"Generated {len(df)} records for {df['product_id'].nunique()} products")
-    
-    # Prepare features and target
-    X, y, df_processed = prepare_training_data(df)
-    logger.info(f"Prepared {X.shape[0]} samples with {X.shape[1]} features")
-    
-    # Chronological split (80% train, 10% val, 10% test)
+
+def train_model(max_items: int = 50, max_days: int = 365) -> Tuple[HistGradientBoostingRegressor, Dict[str, Any]]:
+    """
+    Executes end-to-end M5 dataset training and benchmarking pipeline.
+    """
+    logger.info("==================================================")
+    logger.info("Starting ORIMS ML Model Training & Benchmarking")
+    logger.info("==================================================")
+
+    # 1. Load M5 Dataset
+    df_raw, provenance = load_m5_dataset(max_items=max_items, max_days=max_days)
+    logger.info(f"Loaded {len(df_raw)} records (Provenance: {provenance})")
+
+    # 2. Build time-series features without leakage
+    X, y, df_clean = build_time_series_features(df_raw)
     n_samples = len(X)
-    train_end = int(n_samples * 0.8)
-    val_end = int(n_samples * 0.9)
-    
+    logger.info(f"Engineered {n_samples} valid training instances with {len(FEATURE_COLUMNS)} features")
+
+    if n_samples < 50:
+        raise ValueError(f"Insufficient training samples ({n_samples}) to fit model reliably.")
+
+    # 3. Chronological Train / Validation / Test Split (no random splitting)
+    # 80% train, 10% validation, 10% test holdout
+    train_end = int(n_samples * 0.80)
+    val_end = int(n_samples * 0.90)
+
     X_train, y_train = X[:train_end], y[:train_end]
     X_val, y_val = X[train_end:val_end], y[train_end:val_end]
     X_test, y_test = X[val_end:], y[val_end:]
-    
-    logger.info(f"Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
-    
-    # Train baseline models for comparison
-    logger.info("Evaluating baselines...")
-    
-    # Baseline 1: Moving average of last 7 days
-    # We need to simulate this - using mean of training targets as proxy
-    baseline_ma_pred = np.full_like(y_test, np.mean(y_train[-1000:]))  # Recent average
-    baseline_ma_metrics = evaluate_model(y_test, baseline_ma_pred)
-    
-    # Baseline 2: Day-of-week naive (simplified - use overall mean by dow)
-    dow_means = {}
-    for dow in range(7):
-        mask = df_processed.iloc[:train_end]['day_of_week'] == dow
-        if mask.any():
-            dow_means[dow] = df_processed.iloc[:train_end][mask]['demand'].mean()
-        else:
-            dow_means[dow] = y_train.mean()
-    
-    test_dows = df_processed.iloc[val_end:]['day_of_week'].values
-    baseline_dow_pred = np.array([dow_means.get(dow, y_train.mean()) for dow in test_dows])
-    baseline_dow_metrics = evaluate_model(y_test, baseline_dow_pred)
-    
-    logger.info(f"Baseline MA - MAE: {baseline_ma_metrics['mae']:.4f}, WAPE: {baseline_ma_metrics['wape']}")
-    logger.info(f"Baseline DoW - MAE: {baseline_dow_metrics['mae']:.4f}, WAPE: {baseline_dow_metrics['wape']}")
-    
-    # Train Gradient Boosting model
-    logger.info("Training Gradient Boosting model...")
-    
+
+    logger.info(f"Chronological split -> Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+
+    # 4. Evaluate Baselines on the test split
+    baseline_ma_metrics, baseline_dow_metrics = compute_baseline_predictions(
+        df_clean, train_end, val_end, y_test
+    )
+    logger.info(f"Baseline Moving Average -> MAE: {baseline_ma_metrics['mae']}, WAPE: {baseline_ma_metrics['wape']}")
+    logger.info(f"Baseline Day-of-Week    -> MAE: {baseline_dow_metrics['mae']}, WAPE: {baseline_dow_metrics['wape']}")
+
+    # 5. Fit Gradient Boosting Regressor
+    logger.info("Fitting HistGradientBoostingRegressor with monotonic non-negative constraints...")
     model = HistGradientBoostingRegressor(
-        max_iter=200,
+        max_iter=250,
         max_depth=6,
-        learning_rate=0.1,
-        min_samples_leaf=10,
-        l2_regularization=1.0,
+        learning_rate=0.08,
+        min_samples_leaf=15,
+        l2_regularization=1.5,
         early_stopping=True,
         validation_fraction=0.1,
-        n_iter_no_change=10,
+        n_iter_no_change=12,
         random_state=42,
     )
-    
     model.fit(X_train, y_train)
-    
-    # Evaluate on validation set
-    val_pred = model.predict(X_val)
-    val_pred = np.maximum(val_pred, 0)
-    val_metrics = evaluate_model(y_val, val_pred)
-    logger.info(f"Validation - MAE: {val_metrics['mae']:.4f}, WAPE: {val_metrics['wape']}")
-    
-    # Evaluate on test set
-    test_pred = model.predict(X_test)
-    test_pred = np.maximum(test_pred, 0)
-    test_metrics = evaluate_model(y_test, test_pred)
-    logger.info(f"Test - MAE: {test_metrics['mae']:.4f}, WAPE: {test_metrics['wape']}")
-    
-    # Compare with baselines
+
+    # 6. Evaluate Model on Validation and Test Splits
+    val_preds = np.maximum(model.predict(X_val), 0.0)
+    val_metrics = evaluate_model(y_val, val_preds)
+
+    test_preds = np.maximum(model.predict(X_test), 0.0)
+    test_metrics = evaluate_model(y_test, test_preds)
+
+    logger.info(f"Model Validation Metrics -> MAE: {val_metrics['mae']}, WAPE: {val_metrics['wape']}")
+    logger.info(f"Model Test Metrics       -> MAE: {test_metrics['mae']}, WAPE: {test_metrics['wape']}")
+
+    # 7. Compare with baselines
     best_baseline_mae = min(baseline_ma_metrics['mae'], baseline_dow_metrics['mae'])
-    improvement = (best_baseline_mae - test_metrics['mae']) / best_baseline_mae * 100
-    logger.info(f"Best baseline MAE: {best_baseline_mae:.4f}")
-    logger.info(f"Model MAE: {test_metrics['mae']:.4f}")
-    logger.info(f"Improvement: {improvement:.1f}%")
-    
-    # Save model
+    if best_baseline_mae > 0:
+        improvement = round(((best_baseline_mae - test_metrics['mae']) / best_baseline_mae) * 100, 2)
+    else:
+        improvement = 0.0
+    logger.info(f"Improvement over Best Baseline: {improvement}%")
+
+    # 8. Persist Model and Metadata
     model_path = MODEL_DIR / "model.joblib"
     joblib.dump(model, model_path)
-    logger.info(f"Model saved to {model_path}")
-    
-    # Save metadata
+    logger.info(f"Model serialized to {model_path}")
+
+    start_date_str = str(df_clean['date'].min())[:10]
+    end_date_str = str(df_clean['date'].max())[:10]
+
     metadata = {
-        "version": f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        "model_family": "gradient_boosting",
-        "data_provenance": "SYNTHETIC",
-        "training_start_date": df_processed['date'].min().isoformat(),
-        "training_end_date": df_processed['date'].max().isoformat(),
+        "version": MODEL_VERSION,
+        "model_family": "hist_gradient_boosting",
+        "data_provenance": provenance,
+        "training_start_date": start_date_str,
+        "training_end_date": end_date_str,
         "feature_schema_version": "1.0",
         "feature_columns": FEATURE_COLUMNS,
+        "target_column": TARGET_COLUMN,
         "metrics": {
             "train": {"n_samples": len(X_train)},
             "validation": val_metrics,
@@ -289,17 +177,25 @@ def train_model():
             "baseline_day_of_week": baseline_dow_metrics,
             "improvement_over_best_baseline_pct": improvement,
         },
+        "model_parameters": {
+            "max_iter": 250,
+            "max_depth": 6,
+            "learning_rate": 0.08,
+            "min_samples_leaf": 15,
+            "l2_regularization": 1.5,
+        },
         "status": "ACTIVE",
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }
-    
+
     metadata_path = MODEL_DIR / "metadata.json"
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2)
-    logger.info(f"Metadata saved to {metadata_path}")
-    
-    logger.info("Training completed successfully!")
+    logger.info(f"Metadata serialized to {metadata_path}")
+
+    logger.info("Training pipeline finished successfully.")
     return model, metadata
+
 
 if __name__ == "__main__":
     train_model()

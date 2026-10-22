@@ -19,6 +19,7 @@ export default function Optimization() {
   const [pagination, setPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 0 });
 
   const [recalculating, setRecalculating] = useState(false);
+  const [modelInfo, setModelInfo] = useState(null);
 
   useEffect(() => {
     fetchRecommendations();
@@ -26,7 +27,17 @@ export default function Optimization() {
     fetchSlowMoving();
     fetchExpiryRisk();
     fetchForecasts();
+    fetchModelInfo();
   }, [pagination.page, filters, activeTab]);
+
+  const fetchModelInfo = async () => {
+    try {
+      const res = await api.get('/optimization/model-info');
+      setModelInfo(res.data);
+    } catch (err) {
+      console.warn('Failed to fetch model info', err);
+    }
+  };
 
   const fetchForecasts = async () => {
     try {
@@ -44,6 +55,7 @@ export default function Optimization() {
       await Promise.all([
         fetchRecommendations(),
         fetchForecasts(),
+        fetchModelInfo(),
         fetchSlowMoving(),
         fetchExpiryRisk(),
       ]);
@@ -169,7 +181,7 @@ export default function Optimization() {
             <ExpiryRiskTab expiryRisk={expiryRisk} />
           )}
           {activeTab === 'forecasts' && (
-            <ForecastsTab forecasts={forecasts} />
+            <ForecastsTab forecasts={forecasts} modelInfo={modelInfo} />
           )}
         </div>
       </div>
@@ -394,7 +406,7 @@ function ExpiryRiskTab({ expiryRisk }) {
   );
 }
 
-function ForecastsTab({ forecasts }) {
+function ForecastsTab({ forecasts, modelInfo }) {
   // Aggregate daily predicted demand for the chart
   const dateMap = {};
   forecasts.forEach(f => {
@@ -406,8 +418,11 @@ function ForecastsTab({ forecasts }) {
     demand: Number(dateMap[date].toFixed(1)),
   }));
 
-  const activeModel = forecasts[0]?.modelVersion || 'None';
-  const activeMethod = forecasts[0]?.forecastMethod || 'None';
+  const activeModel = modelInfo?.version || forecasts[0]?.modelVersion || 'None';
+  const activeMethod = forecasts[0]?.forecastMethod || (modelInfo?.status === 'ACTIVE' ? 'MODEL' : 'BASELINE_MOVING_AVERAGE');
+  const provenance = modelInfo?.data_provenance || 'M5 Benchmark';
+  const testMae = modelInfo?.metrics?.test?.mae;
+  const improvement = modelInfo?.metrics?.improvement_over_best_baseline_pct;
 
   return (
     <div className="space-y-6">
@@ -416,18 +431,22 @@ function ForecastsTab({ forecasts }) {
         <div className="card p-4 border border-gray-100">
           <p className="text-xs font-medium text-gray-500 uppercase">Active Forecast Records</p>
           <p className="text-2xl font-bold text-gray-900 mt-1">{forecasts.length}</p>
+          <p className="text-xs text-gray-400 mt-1">Horizon: 7 Days</p>
         </div>
         <div className="card p-4 border border-gray-100">
           <p className="text-xs font-medium text-gray-500 uppercase">Model Version</p>
-          <p className="text-lg font-bold font-mono text-blue-600 mt-1">{activeModel}</p>
+          <p className="text-lg font-bold font-mono text-blue-600 mt-1 truncate" title={activeModel}>{activeModel}</p>
+          <p className="text-xs text-gray-500 mt-1">Data: <span className="font-medium text-gray-700">{provenance}</span></p>
         </div>
         <div className="card p-4 border border-gray-100">
           <p className="text-xs font-medium text-gray-500 uppercase">Primary Method</p>
           <p className="text-lg font-bold text-gray-900 mt-1">{activeMethod}</p>
+          <p className="text-xs text-gray-500 mt-1">{modelInfo?.model_family || 'Gradient Boosting'}</p>
         </div>
         <div className="card p-4 border border-gray-100">
-          <p className="text-xs font-medium text-gray-500 uppercase">Forecast Horizon</p>
-          <p className="text-2xl font-bold text-green-600 mt-1">7 Days</p>
+          <p className="text-xs font-medium text-gray-500 uppercase">Validation Metric</p>
+          <p className="text-2xl font-bold text-green-600 mt-1">{testMae ? `MAE ${testMae}` : 'Standard'}</p>
+          <p className="text-xs text-green-700 mt-1 font-medium">{improvement ? `+${improvement}% vs baseline` : 'Evaluated'}</p>
         </div>
       </div>
 

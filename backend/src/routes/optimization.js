@@ -256,6 +256,14 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     const incoming = incomingQtyMap[p.id] || 0;
     const leadTime = supplierProd?.leadTimeDays || 7;
 
+    const slice7 = recent.slice(-7);
+    const mean7 = slice7.length > 0 ? slice7.reduce((a, b) => a + b, 0) / slice7.length : 0;
+    const std7 = slice7.length > 1 ? Math.sqrt(slice7.reduce((a, b) => a + Math.pow(b - mean7, 2), 0) / slice7.length) : 0;
+
+    const slice14 = recent.slice(-14);
+    const mean14 = slice14.length > 0 ? slice14.reduce((a, b) => a + b, 0) / slice14.length : 0;
+    const std14 = slice14.length > 1 ? Math.sqrt(slice14.reduce((a, b) => a + Math.pow(b - mean14, 2), 0) / slice14.length) : 0;
+
     return {
       product_id: p.id,
       store_id: targetStoreId,
@@ -270,6 +278,10 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
       lag_7: recent[recent.length - 7] || 0,
       lag_14: recent[recent.length - 14] || 0,
       lag_28: recent[recent.length - 28] || 0,
+      rolling_mean_7: Math.round(mean7 * 100) / 100,
+      rolling_std_7: Math.round(std7 * 100) / 100,
+      rolling_mean_14: Math.round(mean14 * 100) / 100,
+      rolling_std_14: Math.round(std14 * 100) / 100,
       recent_sales: recent,
     };
   });
@@ -319,9 +331,10 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     let forecastMethod = 'MODEL';
 
     const mlProdResult = forecastData?.predictions?.find(p => p.product_id === product.id);
-    if (mlProdResult && mlProdResult.predictions?.length > 0) {
+    if (mlProdResult && mlProdResult.status !== 'error' && mlProdResult.predictions?.length > 0) {
       productPreds = mlProdResult.predictions;
-      forecastMethod = mlProdResult.method || 'MODEL';
+      const validMethods = ['MODEL', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK'];
+      forecastMethod = validMethods.includes(mlProdResult.method) ? mlProdResult.method : 'MODEL';
     } else {
       // Fallback moving average
       forecastMethod = 'BASELINE_MOVING_AVERAGE';
@@ -600,6 +613,30 @@ router.get('/expiry-risk', validate(expiryRiskQuerySchema), async (req, res) => 
     data: data.slice(skip, skip + limit),
     pagination: { page, limit, total: data.length, totalPages: Math.ceil(data.length / limit) },
   });
+});
+
+router.get('/model-info', async (req, res) => {
+  const mlUrl = process.env.ML_SERVICE_URL || 'http://localhost:8000';
+  const mlApiKey = process.env.ML_SERVICE_API_KEY || 'dev-ml-api-key';
+  try {
+    const response = await fetch(`${mlUrl}/internal/model-info`, {
+      headers: { 'X-API-Key': mlApiKey },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return res.json(data);
+    }
+    return res.status(response.status).json({ error: 'Failed to retrieve model info' });
+  } catch (err) {
+    return res.json({
+      status: 'DEGRADED',
+      version: 'FALLBACK-v1.0',
+      model_family: 'rule_based_fallback',
+      metrics: {},
+      error: err.message,
+    });
+  }
 });
 
 export default router;

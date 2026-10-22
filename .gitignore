@@ -52,6 +52,7 @@ prisma/migrations/.migration_lock.toml
 
 # ML Service
 ml-service/models/
+ml-service/data/
 ml-service/__pycache__/
 ml-service/*.pyc
 ml-service/.pytest_cache/

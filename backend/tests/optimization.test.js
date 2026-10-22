@@ -181,4 +181,13 @@ describe('Optimization & ML Forecasting Suite', () => {
     expect(rejectRes.body.recommendation.status).toBe('REJECTED');
     expect(rejectRes.body.recommendation.reviewReason).toBe('Budget constraint for this cycle');
   });
+
+  it('GET /api/v1/optimization/model-info returns active or graceful fallback metadata', async () => {
+    const res = await apiRequest('/api/v1/optimization/model-info', {
+      token: adminToken,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toBeDefined();
+    expect(res.body.model_family).toBeDefined();
+  });
 });

@@ -1,20 +1,31 @@
+"""
+FastAPI Inference Service for ORIMS ML Demand Forecasting.
+
+Endpoints:
+- GET /health: Service health and model status
+- GET /internal/model-info: Version, family, training dates, and metrics
+- POST /internal/forecasts: Multi-horizon retail demand forecasts
+"""
+
 import os
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from contextlib import asynccontextmanager
 
 import numpy as np
-import pandas as pd
 import joblib
 from fastapi import FastAPI, HTTPException, Depends, Security, status
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, validator
-from contextlib import asynccontextmanager
+from pydantic import BaseModel, Field
+
+from features import FEATURE_COLUMNS, prepare_inference_features
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -29,29 +40,33 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 ML_API_KEY = os.getenv("ML_API_KEY", "dev-ml-api-key")
 MODEL_VERSION = os.getenv("MODEL_VERSION", "v1.0.0")
-MODEL_FAMILY = "gradient_boosting"
+MODEL_FAMILY = "hist_gradient_boosting"
 
 # Security
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
 async def verify_api_key(api_key: str = Security(api_key_header)):
-    if api_key != ML_API_KEY:
+    if not api_key or api_key != ML_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="Invalid or missing API key",
         )
     return api_key
 
+
 # Global model storage
 model = None
-model_metadata = {}
+model_metadata: Dict[str, Any] = {}
 
-# Pydantic models
+
+# Pydantic schemas
 class ForecastRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
     products: List[Dict[str, Any]] = Field(..., description="List of product feature sets")
     horizon_days: int = Field(default=7, ge=1, le=30, description="Forecast horizon in days")
     feature_schema_version: str = Field(default="1.0", description="Feature schema version")
+
 
 class ForecastResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
@@ -62,6 +77,7 @@ class ForecastResponse(BaseModel):
     feature_schema_version: str
     status: str = "success"
 
+
 class HealthResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
     status: str
@@ -69,135 +85,86 @@ class HealthResponse(BaseModel):
     model_version: Optional[str]
     timestamp: str
 
+
 class ModelInfoResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
     version: str
     model_family: str
+    data_provenance: Optional[str] = "SYNTHETIC"
     training_start_date: Optional[str]
     training_end_date: Optional[str]
     feature_schema_version: str
     metrics: Dict[str, Any]
     status: str
 
-# Model loading
+
 def load_model():
+    """Load serialized model and metadata from disk."""
     global model, model_metadata
     model_path = MODEL_DIR / "model.joblib"
     metadata_path = MODEL_DIR / "metadata.json"
-    
+
     if model_path.exists():
         try:
             model = joblib.load(model_path)
-            logger.info(f"Model loaded from {model_path}")
+            logger.info(f"Model loaded successfully from {model_path}")
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load model artifact: {e}")
             model = None
-    
+
     if metadata_path.exists():
         try:
-            with open(metadata_path, 'r') as f:
+            with open(metadata_path, "r", encoding="utf-8") as f:
                 model_metadata = json.load(f)
             logger.info(f"Model metadata loaded from {metadata_path}")
         except Exception as e:
-            logger.error(f"Failed to load model metadata: {e}")
+            logger.error(f"Failed to load metadata: {e}")
             model_metadata = {}
     else:
         model_metadata = {
             "version": MODEL_VERSION,
             "model_family": MODEL_FAMILY,
+            "data_provenance": "SYNTHETIC",
             "training_start_date": None,
             "training_end_date": None,
             "feature_schema_version": "1.0",
             "metrics": {},
-            "status": "NO_MODEL"
+            "status": "NO_MODEL",
         }
 
-# Feature preparation
-def prepare_features(product_data: Dict[str, Any], day_offset: int = 0) -> np.ndarray:
-    """
-    Prepare features for a single product.
-    Expected features (in order):
-    - lag_1, lag_7, lag_14, lag_28
-    - rolling_mean_7, rolling_std_7
-    - rolling_mean_14, rolling_std_14
-    - day_of_week, month, is_weekend
-    - selling_price, cost_price, price_ratio
-    - on_hand, available, safety_stock
-    - incoming_qty, lead_time_days
-    """
-    features = []
-    
-    # Lag features
-    for lag in [1, 7, 14, 28]:
-        features.append(product_data.get(f'lag_{lag}', 0))
-    
-    # Rolling statistics
-    for window in [7, 14]:
-        features.append(product_data.get(f'rolling_mean_{window}', 0))
-        features.append(product_data.get(f'rolling_std_{window}', 0))
-    
-    # Calendar features adjusted for forecast day offset
-    target_date = datetime.now().date() + timedelta(days=day_offset + 1)
-    dow = product_data.get('day_of_week', target_date.weekday())
-    month = product_data.get('month', target_date.month)
-    features.append(dow)
-    features.append(month)
-    features.append(1 if dow >= 5 else 0)
-    
-    # Price features
-    selling_price = float(product_data.get('selling_price', 1))
-    cost_price = float(product_data.get('cost_price', 1))
-    features.append(selling_price)
-    features.append(cost_price)
-    features.append(selling_price / max(cost_price, 0.01))
-    
-    # Inventory features
-    features.append(float(product_data.get('on_hand', 0)))
-    features.append(float(product_data.get('available', 0)))
-    features.append(float(product_data.get('safety_stock', 0)))
-    
-    # Supply chain features
-    features.append(float(product_data.get('incoming_qty', 0)))
-    features.append(float(product_data.get('lead_time_days', 7)))
-    
-    return np.array(features, dtype=float).reshape(1, -1)
 
-# Baseline forecast
-def baseline_forecast(product_data: Dict[str, Any], horizon: int) -> List[float]:
-    """Simple moving average baseline."""
-    recent_sales = product_data.get('recent_sales', [])
-    if not recent_sales or len(recent_sales) == 0:
-        return [0.0] * horizon
-    
-    # Use last 7 days average
-    window = min(7, len(recent_sales))
-    avg = np.mean(recent_sales[-window:])
-    return [max(0, avg)] * horizon
+def compute_baseline_forecast(product_data: Dict[str, Any], horizon: int) -> Tuple[List[float], str]:
+    """Fallback moving average or day-of-week forecast when ML model is unavailable."""
+    recent_sales = [float(x) for x in product_data.get('recent_sales', [])]
+    if not recent_sales:
+        return [0.0] * horizon, "BASELINE_MOVING_AVERAGE"
 
-def day_of_week_baseline(product_data: Dict[str, Any], horizon: int) -> List[float]:
-    """Day-of-week naive forecast."""
     dow_patterns = product_data.get('dow_patterns', {})
-    if not dow_patterns:
-        return baseline_forecast(product_data, horizon)
-    
-    predictions = []
-    for i in range(horizon):
-        target_dow = (datetime.now().weekday() + i + 1) % 7
-        predictions.append(dow_patterns.get(str(target_dow), 0))
-    return predictions
+    if dow_patterns and len(recent_sales) >= 14:
+        preds = []
+        for i in range(horizon):
+            target_dow = (datetime.now(timezone.utc).weekday() + i + 1) % 7
+            preds.append(float(dow_patterns.get(str(target_dow), np.mean(recent_sales[-7:]))))
+        return preds, "BASELINE_DAY_OF_WEEK"
 
-# Lifespan
+    # Moving average of last 7 observations
+    window = min(7, len(recent_sales))
+    avg = float(np.mean(recent_sales[-window:]))
+    return [max(0.0, avg)] * horizon, "BASELINE_MOVING_AVERAGE"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_model()
     yield
 
-# Create FastAPI app
+
 app = FastAPI(
     title="ORIMS ML Forecasting Service",
     version="1.0.0",
     lifespan=lifespan,
 )
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
@@ -208,28 +175,29 @@ async def health():
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
+
 @app.get("/internal/model-info", response_model=ModelInfoResponse)
 async def model_info(api_key: str = Depends(verify_api_key)):
     return ModelInfoResponse(
         version=model_metadata.get("version", MODEL_VERSION),
         model_family=model_metadata.get("model_family", MODEL_FAMILY),
+        data_provenance=model_metadata.get("data_provenance", "SYNTHETIC"),
         training_start_date=model_metadata.get("training_start_date"),
         training_end_date=model_metadata.get("training_end_date"),
         feature_schema_version=model_metadata.get("feature_schema_version", "1.0"),
         metrics=model_metadata.get("metrics", {}),
-        status=model_metadata.get("status", "UNKNOWN"),
+        status=model_metadata.get("status", "ACTIVE" if model is not None else "NO_MODEL"),
     )
+
 
 @app.post("/internal/forecasts", response_model=ForecastResponse)
 async def forecast(request: ForecastRequest, api_key: str = Depends(verify_api_key)):
-    if model is None:
-        logger.warning("Model not loaded, using baseline fallback")
-    
     predictions = []
+
     for product in request.products:
-        product_id = product.get('product_id')
-        store_id = product.get('store_id', 'default-store')
-        
+        product_id = product.get("product_id")
+        store_id = product.get("store_id", "default-store")
+
         if product_id is None:
             predictions.append({
                 "product_id": product_id,
@@ -239,38 +207,37 @@ async def forecast(request: ForecastRequest, api_key: str = Depends(verify_api_k
                 "error": "Missing product_id",
             })
             continue
-        
+
         try:
             if model is not None:
-                # Use trained model across horizon
+                # Multi-step autoregressive rollout
                 preds = []
                 prod_copy = dict(product)
+                # Clone recent_sales to avoid mutating input
+                prod_copy["recent_sales"] = list(prod_copy.get("recent_sales", []))
+
                 for day_idx in range(request.horizon_days):
-                    features = prepare_features(prod_copy, day_offset=day_idx)
-                    step_pred = float(np.maximum(model.predict(features)[0], 0))
+                    features = prepare_inference_features(prod_copy, day_offset=day_idx)
+                    step_pred = float(np.maximum(model.predict(features)[0], 0.0))
                     preds.append(step_pred)
-                    # Update lag_1 autoregressively for next step
-                    prod_copy['lag_1'] = step_pred
+
+                    # Update autoregressive lags for subsequent horizon steps
+                    prod_copy["lag_1"] = step_pred
+                    prod_copy["recent_sales"].append(step_pred)
+
                 method = "MODEL"
             else:
-                # Fallback to baseline
-                recent_sales = product.get('recent_sales', [])
-                if len(recent_sales) >= 7:
-                    preds = day_of_week_baseline(product, request.horizon_days)
-                    method = "BASELINE_DAY_OF_WEEK"
-                else:
-                    preds = baseline_forecast(product, request.horizon_days)
-                    method = "BASELINE_MOVING_AVERAGE"
-            
-            # Format predictions
+                preds, method = compute_baseline_forecast(product, request.horizon_days)
+
+            # Format dated predictions
             pred_list = []
             for i, pred in enumerate(preds[:request.horizon_days]):
-                target_date = datetime.now(timezone.utc).date() + timedelta(days=i+1)
+                target_date = datetime.now(timezone.utc).date() + timedelta(days=i + 1)
                 pred_list.append({
                     "target_date": target_date.isoformat(),
                     "predicted_demand": round(float(pred), 2),
                 })
-            
+
             predictions.append({
                 "product_id": product_id,
                 "store_id": store_id,
@@ -278,27 +245,27 @@ async def forecast(request: ForecastRequest, api_key: str = Depends(verify_api_k
                 "status": "success",
                 "method": method,
             })
-            
+
         except Exception as e:
-            logger.error(f"Prediction failed for product {product_id}: {e}")
-            # Fallback to baseline
-            preds = baseline_forecast(product, request.horizon_days)
+            logger.error(f"Inference failed for product {product_id}: {e}")
+            preds, method = compute_baseline_forecast(product, request.horizon_days)
             pred_list = []
             for i, pred in enumerate(preds[:request.horizon_days]):
-                target_date = datetime.now(timezone.utc).date() + timedelta(days=i+1)
+                target_date = datetime.now(timezone.utc).date() + timedelta(days=i + 1)
                 pred_list.append({
                     "target_date": target_date.isoformat(),
                     "predicted_demand": round(float(pred), 2),
                 })
+
             predictions.append({
                 "product_id": product_id,
                 "store_id": store_id,
                 "predictions": pred_list,
                 "status": "fallback",
-                "method": "BASELINE_MOVING_AVERAGE",
+                "method": method,
                 "error": str(e),
             })
-    
+
     return ForecastResponse(
         predictions=predictions,
         model_version=model_metadata.get("version", MODEL_VERSION),
@@ -307,6 +274,7 @@ async def forecast(request: ForecastRequest, api_key: str = Depends(verify_api_k
         feature_schema_version=request.feature_schema_version,
         status="success",
     )
+
 
 if __name__ == "__main__":
     import uvicorn
