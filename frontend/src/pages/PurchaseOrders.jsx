@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 
 export default function PurchaseOrders() {
   const [orders, setOrders] = useState([]);
@@ -90,7 +91,6 @@ export default function PurchaseOrders() {
     }
   };
 
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
   const getStatusBadge = (status) => {
     const badges = { DRAFT: 'badge-gray', SUBMITTED: 'badge-blue', PARTIALLY_RECEIVED: 'badge-yellow', RECEIVED: 'badge-green', CANCELLED: 'badge-red' };
     return badges[status] || 'badge-gray';

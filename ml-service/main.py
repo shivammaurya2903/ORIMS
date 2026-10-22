@@ -18,8 +18,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-default_model_dir = Path("/app/models") if Path("/app/models").exists() else Path(__file__).parent / "models"
-MODEL_DIR = Path(os.getenv("MODEL_PATH", str(default_model_dir)))
+if os.getenv("MODEL_PATH"):
+    MODEL_DIR = Path(os.getenv("MODEL_PATH"))
+elif os.name == "posix" and Path("/app/models").exists():
+    MODEL_DIR = Path("/app/models")
+else:
+    MODEL_DIR = Path(__file__).resolve().parent / "models"
+
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 ML_API_KEY = os.getenv("ML_API_KEY", "dev-ml-api-key")

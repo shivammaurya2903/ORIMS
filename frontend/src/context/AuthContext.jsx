@@ -25,12 +25,19 @@ export function AuthProvider({ children }) {
   const login = async (email, password) => {
     const response = await api.post('/auth/login', { email, password });
     setUser(response.data.user);
+    if (response.data.accessToken) {
+      api.defaults.headers.common['Authorization'] = `Bearer ${response.data.accessToken}`;
+    }
     return response.data.user;
   };
 
   const logout = async () => {
-    await api.post('/auth/logout');
-    setUser(null);
+    try {
+      await api.post('/auth/logout');
+    } finally {
+      delete api.defaults.headers.common['Authorization'];
+      setUser(null);
+    }
   };
 
   const hasRole = (...roles) => {

@@ -1,5 +1,11 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import mysql from 'mysql2/promise';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 async function main() {
   const host = process.env.DB_HOST || '127.0.0.1';
@@ -78,7 +84,11 @@ async function main() {
     }
 
     if (connection) {
-      try { await connection.end(); } catch {}
+      try {
+        await connection.end();
+      } catch (_closeErr) {
+        // Safe disposal
+      }
     }
     process.exit(1);
   }

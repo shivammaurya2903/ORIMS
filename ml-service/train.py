@@ -13,7 +13,7 @@ import os
 import json
 import logging
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -29,8 +29,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-default_model_dir = Path("/app/models") if Path("/app/models").exists() else Path(__file__).parent / "models"
-MODEL_DIR = Path(os.getenv("MODEL_PATH", str(default_model_dir)))
+if os.getenv("MODEL_PATH"):
+    MODEL_DIR = Path(os.getenv("MODEL_PATH"))
+elif os.name == "posix" and Path("/app/models").exists():
+    MODEL_DIR = Path("/app/models")
+else:
+    MODEL_DIR = Path(__file__).resolve().parent / "models"
+
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "mysql://orims_user:orims_dev_password@localhost:3306/orims")
@@ -285,7 +290,7 @@ def train_model():
             "improvement_over_best_baseline_pct": improvement,
         },
         "status": "ACTIVE",
-        "trained_at": datetime.utcnow().isoformat(),
+        "trained_at": datetime.now(timezone.utc).isoformat(),
     }
     
     metadata_path = MODEL_DIR / "metadata.json"

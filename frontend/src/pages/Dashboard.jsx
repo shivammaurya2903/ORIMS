@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency, formatNumber } from '../utils/format';
 import { 
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Cell
@@ -51,9 +52,6 @@ export default function Dashboard() {
       </div>
     );
   }
-
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
-  const formatNumber = (value) => new Intl.NumberFormat('en-US').format(value || 0);
 
   return (
     <div className="space-y-6">

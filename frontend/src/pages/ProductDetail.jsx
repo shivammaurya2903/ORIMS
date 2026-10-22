@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 
 export default function ProductDetail() {
   const { id } = useParams();
@@ -44,8 +45,6 @@ export default function ProductDetail() {
   if (!product) {
     return <div className="text-center p-8 text-gray-500">Product not found</div>;
   }
-
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
 
   return (
     <div className="space-y-6">

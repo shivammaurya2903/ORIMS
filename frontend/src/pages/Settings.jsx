@@ -111,8 +111,6 @@ export default function Settings() {
     }
   };
 
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">

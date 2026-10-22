@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 import { v4 as uuidv4 } from 'uuid';
 
 export default function POS() {
@@ -100,8 +101,6 @@ export default function POS() {
       setCheckingOut(false);
     }
   };
-
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
 
   const { subtotal, tax, total } = calculateTotals();
 

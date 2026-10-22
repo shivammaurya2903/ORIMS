@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, PieChart, Pie, Cell as PieCell } from 'recharts';
+import { formatCurrency, formatNumber } from '../utils/format';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
@@ -9,10 +10,14 @@ export default function Reports() {
   const [salesReport, setSalesReport] = useState(null);
   const [valuationReport, setValuationReport] = useState(null);
   const [turnoverReport, setTurnoverReport] = useState(null);
+  const [stockMovementsReport, setStockMovementsReport] = useState(null);
+  const [expiryRiskReport, setExpiryRiskReport] = useState(null);
   const [filters, setFilters] = useState({
     sales: { startDate: new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0], groupBy: 'day' },
     valuation: { valuationMethod: 'CURRENT_COST' },
     turnover: { startDate: new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0] },
+    stockMovements: { startDate: new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0] },
+    expiryRisk: { daysAhead: 60 },
   });
   const [loading, setLoading] = useState(false);
 
@@ -52,20 +57,49 @@ export default function Reports() {
     }
   };
 
-  useEffect(() => {
-    fetchSalesReport();
-  }, [filters.sales]);
+  const fetchStockMovementsReport = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/reports/stock-movements', { params: filters.stockMovements });
+      setStockMovementsReport(res.data);
+    } catch (err) {
+      console.error('Failed to fetch stock movements report', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchExpiryRiskReport = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/reports/expiry-risk', { params: filters.expiryRisk });
+      setExpiryRiskReport(res.data);
+    } catch (err) {
+      console.error('Failed to fetch expiry risk report', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    fetchValuationReport();
-  }, [filters.valuation]);
+    if (activeTab === 'sales') fetchSalesReport();
+  }, [filters.sales, activeTab]);
 
   useEffect(() => {
-    fetchTurnoverReport();
-  }, [filters.turnover]);
+    if (activeTab === 'valuation') fetchValuationReport();
+  }, [filters.valuation, activeTab]);
 
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
-  const formatNumber = (value) => new Intl.NumberFormat('en-US').format(value || 0);
+  useEffect(() => {
+    if (activeTab === 'turnover') fetchTurnoverReport();
+  }, [filters.turnover, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'stock-movements') fetchStockMovementsReport();
+  }, [filters.stockMovements, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'expiry-risk') fetchExpiryRiskReport();
+  }, [filters.expiryRisk, activeTab]);
 
   return (
     <div className="space-y-6">
@@ -125,10 +159,22 @@ export default function Reports() {
             />
           )}
           {activeTab === 'stock-movements' && (
-            <StockMovementsReportTab />
+            <StockMovementsReportTab 
+              report={stockMovementsReport}
+              loading={loading}
+              filters={filters.stockMovements}
+              setFilters={(f) => setFilters({...filters, stockMovements: f})}
+              onFetch={fetchStockMovementsReport}
+            />
           )}
           {activeTab === 'expiry-risk' && (
-            <ExpiryRiskReportTab />
+            <ExpiryRiskReportTab 
+              report={expiryRiskReport}
+              loading={loading}
+              filters={filters.expiryRisk}
+              setFilters={(f) => setFilters({...filters, expiryRisk: f})}
+              onFetch={fetchExpiryRiskReport}
+            />
           )}
         </div>
       </div>
@@ -351,12 +397,166 @@ function TurnoverReportTab({ report, loading, filters, setFilters, onFetch }) {
   );
 }
 
-function StockMovementsReportTab() {
-  return <div className="text-center py-12 text-gray-500"><p>Stock Movements Report - to be implemented</p></div>;
+function StockMovementsReportTab({ report, loading, filters, setFilters, onFetch }) {
+  const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
+
+  return (
+    <div>
+      <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div>
+          <label className="label">Start Date</label>
+          <input type="date" value={filters.startDate} onChange={(e) => setFilters({...filters, startDate: e.target.value})} className="input" />
+        </div>
+        <div>
+          <label className="label">End Date</label>
+          <input type="date" value={filters.endDate} onChange={(e) => setFilters({...filters, endDate: e.target.value})} className="input" />
+        </div>
+        <div className="flex items-end">
+          <button type="submit" disabled={loading} className="btn-primary w-full">
+            {loading ? 'Loading...' : 'Generate Report'}
+          </button>
+        </div>
+      </form>
+
+      {loading ? (
+        <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent"></div></div>
+      ) : !report ? null : (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {report.summary && Object.entries(report.summary).map(([type, stats]) => (
+              <div key={type} className="card p-4">
+                <p className="text-xs font-medium text-gray-500 capitalize">{type.replace(/_/g, ' ')}</p>
+                <p className="text-xl font-bold text-gray-900 mt-1">{stats.count} records</p>
+                <p className="text-xs text-blue-600 mt-0.5">{stats.totalQty} total units</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="card">
+            <div className="p-4 border-b border-gray-200">
+              <h3 className="text-base font-semibold text-gray-900">Movement Ledger Records</h3>
+            </div>
+            <div className="table-container">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Product</th>
+                    <th>SKU</th>
+                    <th>Movement Type</th>
+                    <th>Delta</th>
+                    <th>Reference</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.data?.length > 0 ? (
+                    report.data.map((m) => (
+                      <tr key={m.id}>
+                        <td>{new Date(m.createdAt).toLocaleString()}</td>
+                        <td className="font-medium">{m.product?.name}</td>
+                        <td className="font-mono text-xs">{m.product?.sku}</td>
+                        <td>
+                          <span className={`badge ${m.quantityDelta > 0 ? 'badge-green' : 'badge-red'}`}>
+                            {m.movementType}
+                          </span>
+                        </td>
+                        <td className={`font-semibold ${m.quantityDelta > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {m.quantityDelta > 0 ? `+${m.quantityDelta}` : m.quantityDelta}
+                        </td>
+                        <td className="text-xs text-gray-500">{m.referenceType || '-'}: {m.referenceId || '-'}</td>
+                        <td className="text-xs text-gray-600">{m.reason || '-'}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr><td colSpan={7} className="p-8 text-center text-gray-500">No stock movements found in this period</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-function ExpiryRiskReportTab() {
-  return <div className="text-center py-12 text-gray-500"><p>Expiry Risk Report - to be implemented</p></div>;
+function ExpiryRiskReportTab({ report, loading, filters, setFilters, onFetch }) {
+  const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
+
+  return (
+    <div>
+      <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div>
+          <label className="label">Expiry Horizon (Days Ahead)</label>
+          <select value={filters.daysAhead} onChange={(e) => setFilters({...filters, daysAhead: Number(e.target.value)})} className="input">
+            <option value={15}>Next 15 Days</option>
+            <option value={30}>Next 30 Days</option>
+            <option value={60}>Next 60 Days</option>
+            <option value={90}>Next 90 Days</option>
+          </select>
+        </div>
+        <div className="flex items-end">
+          <button type="submit" disabled={loading} className="btn-primary w-full">
+            {loading ? 'Loading...' : 'Check Expiry Risk'}
+          </button>
+        </div>
+      </form>
+
+      {loading ? (
+        <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent"></div></div>
+      ) : !report ? null : (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <SummaryCard title="Batches at Risk" value={report.totalBatches} />
+            <SummaryCard title="Total Value at Risk" value={formatCurrency(report.totalValueAtRisk)} />
+          </div>
+
+          <div className="card">
+            <div className="p-4 border-b border-gray-200">
+              <h3 className="text-base font-semibold text-gray-900">Batches Approaching Expiry</h3>
+            </div>
+            <div className="table-container">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Batch #</th>
+                    <th>Product</th>
+                    <th>Expiry Date</th>
+                    <th>Days Left</th>
+                    <th>Quantity On Hand</th>
+                    <th>Value at Risk</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.data?.length > 0 ? (
+                    report.data.map((b, idx) => (
+                      <tr key={idx}>
+                        <td className="font-mono text-xs">{b.batchNumber}</td>
+                        <td className="font-medium">{b.product?.name}</td>
+                        <td>{new Date(b.expiryDate).toLocaleDateString()}</td>
+                        <td className="font-semibold text-orange-600">{b.daysUntilExpiry} days</td>
+                        <td>{b.quantityOnHand}</td>
+                        <td>{formatCurrency(b.valueAtRisk)}</td>
+                        <td>
+                          <span className={`badge ${b.status === 'EXPIRED' ? 'badge-red' : 'badge-yellow'}`}>
+                            {b.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr><td colSpan={7} className="p-8 text-center text-gray-500">No batches expiring within {filters.daysAhead} days</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SummaryCard({ title, value }) {
@@ -367,6 +567,3 @@ function SummaryCard({ title, value }) {
     </div>
   );
 }
-
-const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
-const formatNumber = (value) => new Intl.NumberFormat('en-US').format(value || 0);

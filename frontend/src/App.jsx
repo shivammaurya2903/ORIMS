@@ -52,6 +52,7 @@ function AppRoutes() {
 
       {/* Authentication */}
       <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Navigate to="/login" replace />} />
 
       {/* Authenticated Application Layout */}
       <Route

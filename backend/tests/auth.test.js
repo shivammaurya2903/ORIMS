@@ -73,4 +73,85 @@ describe('Auth & Authorization Suite', () => {
     expect(res.status).toBe(200);
     expect(res.body.message).toMatch(/Logged out successfully/i);
   });
+
+  it('rejects login with malformed/missing fields with 400 validation error', async () => {
+    const res = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: 'not-an-email', password: '123' },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    expect(Array.isArray(res.body.details)).toBe(true);
+  });
+
+  it('admin creates account end-to-end, assigns role, and rejects duplicate email', async () => {
+    const token = await getAuthToken('ADMIN');
+    const uniqueEmail = `staff_${Date.now()}@orims.local`;
+
+    // 1. Create account
+    const createRes = await apiRequest('/api/v1/users', {
+      method: 'POST',
+      token,
+      body: {
+        name: 'Automated Test Staff',
+        email: uniqueEmail,
+        password: 'password123',
+        role: 'INVENTORY_STAFF',
+      },
+    });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.user).toMatchObject({
+      email: uniqueEmail,
+      role: 'INVENTORY_STAFF',
+      status: 'ACTIVE',
+    });
+
+    const newUserId = createRes.body.user.id;
+
+    // 2. Reject duplicate account creation
+    const dupRes = await apiRequest('/api/v1/users', {
+      method: 'POST',
+      token,
+      body: {
+        name: 'Duplicate Staff',
+        email: uniqueEmail,
+        password: 'password123',
+        role: 'INVENTORY_STAFF',
+      },
+    });
+    expect(dupRes.status).toBe(400);
+    expect(dupRes.body.error).toMatch(/already registered/i);
+
+    // 3. New user authenticates successfully
+    const loginRes = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: uniqueEmail, password: 'password123' },
+    });
+    expect(loginRes.status).toBe(200);
+    expect(loginRes.body.user.role).toBe('INVENTORY_STAFF');
+
+    // 4. Deactivate account and verify disabled account cannot authenticate
+    const deactRes = await apiRequest(`/api/v1/users/${newUserId}`, {
+      method: 'PATCH',
+      token,
+      body: { status: 'INACTIVE' },
+    });
+    expect(deactRes.status).toBe(200);
+    expect(deactRes.body.user.status).toBe('INACTIVE');
+
+    const blockedLogin = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: uniqueEmail, password: 'password123' },
+    });
+    expect(blockedLogin.status).toBe(401);
+    expect(blockedLogin.body.error).toMatch(/Invalid credentials/i);
+  });
+
+  it('POST /api/v1/auth/refresh rejects requests without refresh cookie/token', async () => {
+    const res = await apiRequest('/api/v1/auth/refresh', {
+      method: 'POST',
+    });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/refresh token/i);
+  });
 });

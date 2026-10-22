@@ -61,7 +61,7 @@ export default function Layout() {
 
   const handleLogout = async () => {
     await logout();
-    navigate('/login');
+    navigate('/');
   };
 
   const filteredNav = navigation.filter(item => 
@@ -134,9 +134,7 @@ export default function Layout() {
             >
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
             </button>
-            <div className="flex-1 lg:flex-none">
-              <Outlet />
-            </div>
+            <div className="flex-1 lg:flex-none" />
           </div>
         </header>
         <main className="p-4 sm:p-6 lg:p-8">

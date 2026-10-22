@@ -1,5 +1,11 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import mysql from 'mysql2/promise';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 let effectiveHost = process.env.DB_HOST || '127.0.0.1';
 let effectivePort = Number(process.env.DB_PORT || 3306);
@@ -18,7 +24,9 @@ if (!effectivePassword && process.env.DATABASE_URL) {
     if (parsed.pathname && parsed.pathname.length > 1) {
       effectiveDatabase = parsed.pathname.replace(/^\//, '');
     }
-  } catch {}
+  } catch (_parseErr) {
+    // Fall back to default parameters if DATABASE_URL cannot be parsed
+  }
 }
 
 const pool = mysql.createPool({

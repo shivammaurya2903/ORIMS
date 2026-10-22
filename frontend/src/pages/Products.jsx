@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 
 export default function Products() {
   const [products, setProducts] = useState([]);
@@ -61,8 +62,6 @@ export default function Products() {
       setCreating(false);
     }
   };
-
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
 
   return (
     <div className="space-y-6">

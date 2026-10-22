@@ -123,6 +123,9 @@ export default function Login() {
             <p className="font-mono text-xs">manager@orims.local / password123</p>
             <p className="font-mono text-xs">sales@orims.local / password123</p>
             <p className="font-mono text-xs">inventory@orims.local / password123</p>
+            <p className="text-xs text-gray-400 mt-3">
+              User accounts are provisioned and managed by store administrators in compliance with enterprise retail security policies.
+            </p>
           </div>
         </form>
       </div>

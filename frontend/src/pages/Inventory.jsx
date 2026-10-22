@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 
 export default function Inventory() {
   const [items, setItems] = useState([]);
@@ -69,8 +70,6 @@ export default function Inventory() {
       setAdjusting(false);
     }
   };
-
-  const formatCurrency = (value) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value || 0);
 
   return (
     <div className="space-y-6">

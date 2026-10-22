@@ -7,8 +7,10 @@ export default function Users() {
   const [pagination, setPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 0 });
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
   const [formData, setFormData] = useState({ name: '', email: '', password: '', role: 'SALES_STAFF' });
   const [editingUser, setEditingUser] = useState(null);
+  const [editError, setEditError] = useState('');
   const [editForm, setEditForm] = useState({ name: '', email: '', role: '', status: 'ACTIVE' });
 
   useEffect(() => {
@@ -31,13 +33,14 @@ export default function Users() {
   const handleCreate = async (e) => {
     e.preventDefault();
     setCreating(true);
+    setCreateError('');
     try {
       await api.post('/users', formData);
       setShowCreateModal(false);
       setFormData({ name: '', email: '', password: '', role: 'SALES_STAFF' });
       fetchUsers();
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to create user');
+      setCreateError(err.response?.data?.error || 'Failed to create user account');
     } finally {
       setCreating(false);
     }
@@ -45,12 +48,13 @@ export default function Users() {
 
   const handleEdit = async (e) => {
     e.preventDefault();
+    setEditError('');
     try {
       await api.patch(`/users/${editingUser.id}`, editForm);
       setEditingUser(null);
       fetchUsers();
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to update user');
+      setEditError(err.response?.data?.error || 'Failed to update user account');
     }
   };
 
@@ -65,6 +69,7 @@ export default function Users() {
   };
 
   const startEdit = (user) => {
+    setEditError('');
     setEditingUser(user);
     setEditForm({ name: user.name, email: user.email, role: user.role, status: user.status });
   };
@@ -118,20 +123,11 @@ export default function Users() {
                     </td>
                     <td>{new Date(user.createdAt).toLocaleDateString()}</td>
                     <td>
-                      <div className="flex gap-1">
-                        {editingUser?.id === user.id ? (
-                          <>
-                            <button onClick={() => handleEdit(e => e.preventDefault())} className="text-green-600 hover:underline text-sm">Save</button>
-                            <button onClick={() => setEditingUser(null)} className="text-gray-600 hover:underline text-sm">Cancel</button>
-                          </>
-                        ) : (
-                          <>
-                            <button onClick={() => startEdit(user)} className="text-blue-600 hover:underline text-sm">Edit</button>
-                            <button onClick={() => toggleStatus(user)} className={`text-sm ${user.status === 'ACTIVE' ? 'text-red-600' : 'text-green-600'} hover:underline`}>
-                              {user.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
-                            </button>
-                          </>
-                        )}
+                      <div className="flex gap-3">
+                        <button onClick={() => startEdit(user)} className="text-blue-600 hover:text-blue-800 font-medium text-sm">Edit</button>
+                        <button onClick={() => toggleStatus(user)} className={`text-sm font-medium ${user.status === 'ACTIVE' ? 'text-red-600 hover:text-red-800' : 'text-green-600 hover:text-green-800'}`}>
+                          {user.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -161,6 +157,11 @@ export default function Users() {
               <button onClick={() => setShowCreateModal(false)} className="text-gray-500 hover:text-gray-700"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
             </div>
             <form onSubmit={handleCreate} className="p-6 space-y-4">
+              {createError && (
+                <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">
+                  {createError}
+                </div>
+              )}
               <div>
                 <label className="label">Name *</label>
                 <input value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} required className="input" />
@@ -200,6 +201,11 @@ export default function Users() {
               <button onClick={() => setEditingUser(null)} className="text-gray-500 hover:text-gray-700"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
             </div>
             <form onSubmit={handleEdit} className="p-6 space-y-4">
+              {editError && (
+                <div className="p-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">
+                  {editError}
+                </div>
+              )}
               <div>
                 <label className="label">Name *</label>
                 <input value={editForm.name} onChange={(e) => setEditForm({...editForm, name: e.target.value})} required className="input" />
