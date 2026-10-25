@@ -16,7 +16,7 @@ import { NotFoundError, ValidationError } from '../middleware/errorHandler.js';
 const router = Router();
 
 // Recommendations
-router.get('/recommendations', validate(recommendationsQuerySchema), async (req, res) => {
+router.get('/recommendations', requireRole('ADMIN', 'MANAGER'), validate(recommendationsQuerySchema), async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const storeId = req.query.storeId;
@@ -30,20 +30,30 @@ router.get('/recommendations', validate(recommendationsQuerySchema), async (req,
   const where = {};
   if (storeId) where.storeId = storeId;
   if (status) where.status = status;
-  if (riskLevel) {
-    // Risk level is computed, not stored - filter after fetching
+  if (categoryId) {
+    where.product = { categoryId };
   }
 
-  const [recommendations] = await Promise.all([
+  const allowedSortFields = ['calculatedAt', 'createdAt', 'rawSuggestedQty', 'finalSuggestedQty', 'targetStock', 'onHandQty'];
+  let orderBy;
+  if (sort === 'urgency') {
+    orderBy = { finalSuggestedQty: order };
+  } else if (allowedSortFields.includes(sort)) {
+    orderBy = { [sort]: order };
+  } else {
+    orderBy = { calculatedAt: order };
+  }
+
+  const [recommendations, totalCount] = await Promise.all([
     prisma.optimizationRecommendation.findMany({
       where,
       skip,
       take: limit,
-      orderBy: { [sort]: order },
+      orderBy,
       include: {
         store: { select: { id: true, name: true } },
         product: { 
-          select: { id: true, name: true, sku: true, category: { select: { name: true } } } 
+          select: { id: true, name: true, sku: true, category: { select: { id: true, name: true } } } 
         },
       },
     }),
@@ -64,13 +74,10 @@ router.get('/recommendations', validate(recommendationsQuerySchema), async (req,
   if (riskLevel) {
     filtered = data.filter(d => d.riskLevel === riskLevel);
   }
-  if (categoryId) {
-    filtered = filtered.filter(d => d.product.category?.id === categoryId);
-  }
 
   res.json({
     data: filtered,
-    pagination: { page, limit, total: filtered.length, totalPages: Math.ceil(filtered.length / limit) },
+    pagination: { page, limit, total: totalCount, totalPages: Math.ceil(totalCount / limit) },
   });
 });
 
@@ -79,73 +86,73 @@ router.post('/recommendations/:id/approve', requireRole('ADMIN', 'MANAGER'), val
   const { approvedQty, createPurchaseOrder } = req.body;
   const actorId = req.user.id;
 
-  const recommendation = await prisma.optimizationRecommendation.findUnique({
-    where: { id },
-    include: { product: true, store: true },
-  });
-  if (!recommendation) throw new NotFoundError('Recommendation not found');
-
-  if (recommendation.status !== 'PENDING') {
-    throw new ValidationError('Recommendation already processed');
-  }
-
-  const finalQty = approvedQty !== undefined ? approvedQty : recommendation.finalSuggestedQty;
-
-  await prisma.optimizationRecommendation.update({
-    where: { id },
-    data: {
-      status: 'APPROVED',
-      finalSuggestedQty: finalQty,
-      reviewedBy: actorId,
-      reviewedAt: new Date(),
-    },
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      actorId,
-      action: 'APPROVE_RECOMMENDATION',
-      entityType: 'OptimizationRecommendation',
-      entityId: id,
-      details: { approvedQty: finalQty, createPurchaseOrder },
-    },
-  });
-
-  let createdPo = null;
-  if (createPurchaseOrder && finalQty > 0) {
-    const supplierProduct = await prisma.supplierProduct.findFirst({
-      where: { productId: recommendation.productId, active: true },
+  const result = await prisma.$transaction(async (tx) => {
+    const recommendation = await tx.optimizationRecommendation.findUnique({
+      where: { id },
+      include: { product: true, store: true },
     });
-    if (supplierProduct) {
-      createdPo = await prisma.purchaseOrder.create({
-        data: {
-          supplierId: supplierProduct.supplierId,
-          storeId: recommendation.storeId,
-          status: 'DRAFT',
-          createdBy: actorId,
-          items: {
-            create: [
-              {
-                productId: recommendation.productId,
-                orderedQty: finalQty,
-                unitCost: supplierProduct.unitCost,
-              },
-            ],
-          },
-        },
-      });
-      await prisma.optimizationRecommendation.update({
-        where: { id },
-        data: { status: 'CONVERTED_TO_PO' },
-      });
-    }
-  }
+    if (!recommendation) throw new NotFoundError('Recommendation not found');
 
-  const resultRec = await prisma.optimizationRecommendation.findUnique({
-    where: { id },
-    include: { product: true, store: true },
+    if (recommendation.status !== 'PENDING') {
+      throw new ValidationError('Recommendation already processed');
+    }
+
+    const finalQty = approvedQty !== undefined ? approvedQty : recommendation.finalSuggestedQty;
+
+    let createdPo = null;
+    let newStatus = 'APPROVED';
+
+    if (createPurchaseOrder && finalQty > 0) {
+      const supplierProduct = await tx.supplierProduct.findFirst({
+        where: { productId: recommendation.productId, active: true },
+      });
+      if (supplierProduct) {
+        createdPo = await tx.purchaseOrder.create({
+          data: {
+            supplierId: supplierProduct.supplierId,
+            storeId: recommendation.storeId,
+            status: 'DRAFT',
+            createdBy: actorId,
+            items: {
+              create: [
+                {
+                  productId: recommendation.productId,
+                  orderedQty: finalQty,
+                  unitCost: supplierProduct.unitCost,
+                },
+              ],
+            },
+          },
+        });
+        newStatus = 'CONVERTED_TO_PO';
+      }
+    }
+
+    const updatedRec = await tx.optimizationRecommendation.update({
+      where: { id },
+      data: {
+        status: newStatus,
+        finalSuggestedQty: finalQty,
+        reviewedBy: actorId,
+        reviewedAt: new Date(),
+      },
+      include: { product: true, store: true },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        actorId,
+        action: 'APPROVE_RECOMMENDATION',
+        entityType: 'OptimizationRecommendation',
+        entityId: id,
+        details: { approvedQty: finalQty, createPurchaseOrder, purchaseOrderId: createdPo?.id },
+      },
+    });
+
+    return { recommendation: updatedRec, purchaseOrder: createdPo };
   });
-  res.json({ recommendation: resultRec, purchaseOrder: createdPo });
+
+  res.json(result);
 });
 
 router.post('/recommendations/:id/reject', requireRole('ADMIN', 'MANAGER'), validate(rejectRecommendationSchema), async (req, res) => {
@@ -223,23 +230,46 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     incomingQtyMap[item.productId] = (incomingQtyMap[item.productId] || 0) + remaining;
   }
 
-  // 3. Fetch recent sales over the last 30 days
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  // 3. Dense 28-day daily calendar with zero-filled missing days
+  const DAYS_HISTORY = 28;
+  const now = new Date();
+  const dateBuckets = [];
+  for (let i = DAYS_HISTORY; i >= 1; i--) {
+    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+    dateBuckets.push(d.toISOString().slice(0, 10)); // 'YYYY-MM-DD'
+  }
+  const historyStart = new Date(now.getTime() - (DAYS_HISTORY + 1) * 24 * 60 * 60 * 1000);
+
   const recentSalesItems = await prisma.saleItem.findMany({
     where: {
       sale: {
         storeId: targetStoreId,
         status: 'COMPLETED',
-        createdAt: { gte: thirtyDaysAgo },
+        createdAt: { gte: historyStart },
       },
     },
-    select: { productId: true, quantity: true, createdAt: true },
+    select: {
+      productId: true,
+      quantity: true,
+      createdAt: true,
+      sale: { select: { createdAt: true } },
+    },
   });
 
-  const salesMap = {};
+  const productDailySales = {};
   for (const item of recentSalesItems) {
-    if (!salesMap[item.productId]) salesMap[item.productId] = [];
-    salesMap[item.productId].push(item.quantity);
+    const itemDate = item.sale?.createdAt || item.createdAt;
+    const dateStr = new Date(itemDate).toISOString().slice(0, 10);
+    if (!productDailySales[item.productId]) {
+      productDailySales[item.productId] = {};
+    }
+    productDailySales[item.productId][dateStr] = (productDailySales[item.productId][dateStr] || 0) + item.quantity;
+  }
+
+  const salesMap = {};
+  for (const p of products) {
+    const dailyMap = productDailySales[p.id] || {};
+    salesMap[p.id] = dateBuckets.map(dayStr => dailyMap[dayStr] || 0);
   }
 
   // 4. Prepare feature payload for ML service
@@ -338,7 +368,8 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     } else {
       // Fallback moving average
       forecastMethod = 'BASELINE_MOVING_AVERAGE';
-      const avg = recent.length > 0 ? recent.reduce((s, v) => s + v, 0) / recent.length : 1;
+      const totalSales = recent.reduce((s, v) => s + v, 0);
+      const avg = totalSales > 0 ? totalSales / recent.length : 1;
       const roundedAvg = Math.max(0, Math.round(avg * 10) / 10);
       for (let d = 1; d <= 7; d++) {
         const targetDate = new Date();
@@ -478,7 +509,7 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
 });
 
 // Forecasts
-router.get('/forecasts', validate(forecastsQuerySchema), async (req, res) => {
+router.get('/forecasts', requireRole('ADMIN', 'MANAGER'), validate(forecastsQuerySchema), async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const storeId = req.query.storeId;
@@ -521,7 +552,7 @@ router.get('/forecasts', validate(forecastsQuerySchema), async (req, res) => {
 });
 
 // Slow moving
-router.get('/slow-moving', validate(slowMovingQuerySchema), async (req, res) => {
+router.get('/slow-moving', requireRole('ADMIN', 'MANAGER'), validate(slowMovingQuerySchema), async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const storeId = req.query.storeId || 'default-store';
@@ -579,7 +610,7 @@ router.get('/slow-moving', validate(slowMovingQuerySchema), async (req, res) => 
 });
 
 // Expiry risk
-router.get('/expiry-risk', validate(expiryRiskQuerySchema), async (req, res) => {
+router.get('/expiry-risk', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), validate(expiryRiskQuerySchema), async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const storeId = req.query.storeId || 'default-store';
@@ -615,7 +646,7 @@ router.get('/expiry-risk', validate(expiryRiskQuerySchema), async (req, res) => 
   });
 });
 
-router.get('/model-info', async (req, res) => {
+router.get('/model-info', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const mlUrl = process.env.ML_SERVICE_URL || 'http://localhost:8000';
   const mlApiKey = process.env.ML_SERVICE_API_KEY || 'dev-ml-api-key';
   try {

@@ -63,7 +63,13 @@ export default function SaleDetail() {
 
     setProcessingReturn(true);
     try {
-      await api.post(`/sales/${id}/returns`, { items: validItems, reason: returnReason });
+      const payloadItems = validItems.map(item => ({
+        saleItemId: item.saleItemId,
+        qtyReturned: item.qtyReturned,
+        restockQty: item.restockQty,
+        writeOffQty: item.writeOffQty,
+      }));
+      await api.post(`/sales/${id}/returns`, { items: payloadItems, reason: returnReason });
       setReturnModal(false);
       setReturnReason('');
       fetchSale();

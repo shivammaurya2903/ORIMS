@@ -66,17 +66,73 @@ function AppRoutes() {
         <Route path="/products" element={<Products />} />
         <Route path="/products/:id" element={<ProductDetail />} />
         <Route path="/inventory" element={<Inventory />} />
-        <Route path="/pos" element={<POS />} />
+        <Route
+          path="/pos"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER', 'CASHIER', 'SALES_STAFF']}>
+              <POS />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/sales" element={<Sales />} />
         <Route path="/sales/:id" element={<SaleDetail />} />
-        <Route path="/suppliers" element={<Suppliers />} />
-        <Route path="/suppliers/:id" element={<SupplierDetail />} />
-        <Route path="/purchase-orders" element={<PurchaseOrders />} />
-        <Route path="/purchase-orders/:id" element={<PurchaseOrderDetail />} />
+        <Route
+          path="/suppliers"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <Suppliers />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/suppliers/:id"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <SupplierDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/purchase-orders"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER', 'INVENTORY_STAFF']}>
+              <PurchaseOrders />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/purchase-orders/:id"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER', 'INVENTORY_STAFF']}>
+              <PurchaseOrderDetail />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/purchases" element={<Navigate to="/purchase-orders" replace />} />
-        <Route path="/purchases/:id" element={<PurchaseOrderDetail />} />
-        <Route path="/optimization" element={<Optimization />} />
-        <Route path="/reports" element={<Reports />} />
+        <Route
+          path="/purchases/:id"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER', 'INVENTORY_STAFF']}>
+              <PurchaseOrderDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/optimization"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <Optimization />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/reports"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <Reports />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/notifications" element={<Notifications />} />
         <Route
           path="/settings"

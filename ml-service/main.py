@@ -63,8 +63,8 @@ model_metadata: Dict[str, Any] = {}
 # Pydantic schemas
 class ForecastRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
-    products: List[Dict[str, Any]] = Field(..., description="List of product feature sets")
-    horizon_days: int = Field(default=7, ge=1, le=30, description="Forecast horizon in days")
+    products: List[Dict[str, Any]] = Field(..., max_length=100, description="List of product feature sets")
+    horizon_days: int = Field(default=7, ge=1, le=14, description="Forecast horizon in days")
     feature_schema_version: str = Field(default="1.0", description="Feature schema version")
 
 
@@ -209,21 +209,26 @@ async def forecast(request: ForecastRequest, api_key: str = Depends(verify_api_k
             continue
 
         try:
-            if model is not None:
+            recent_sales = list(product.get("recent_sales", []))
+
+            if len(recent_sales) < 7:
+                preds, method = compute_baseline_forecast(product, request.horizon_days)
+                method = "INSUFFICIENT_DATA_BASELINE"
+            elif model is not None:
                 # Multi-step autoregressive rollout
                 preds = []
                 prod_copy = dict(product)
-                # Clone recent_sales to avoid mutating input
-                prod_copy["recent_sales"] = list(prod_copy.get("recent_sales", []))
+                prod_copy["recent_sales"] = list(recent_sales)
 
                 for day_idx in range(request.horizon_days):
                     features = prepare_inference_features(prod_copy, day_offset=day_idx)
                     step_pred = float(np.maximum(model.predict(features)[0], 0.0))
                     preds.append(step_pred)
 
-                    # Update autoregressive lags for subsequent horizon steps
-                    prod_copy["lag_1"] = step_pred
+                    # Update autoregressive lags and clear static stats so dynamic rolling derivation occurs
                     prod_copy["recent_sales"].append(step_pred)
+                    for key in ["lag_1", "lag_7", "lag_14", "lag_28", "rolling_mean_7", "rolling_std_7", "rolling_mean_14", "rolling_std_14"]:
+                        prod_copy.pop(key, None)
 
                 method = "MODEL"
             else:

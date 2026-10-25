@@ -10,31 +10,50 @@ const router = Router();
 router.get('/store', async (req, res) => {
   let store = await prisma.store.findFirst();
   if (!store) {
-    store = await prisma.store.create({
-      data: { name: 'Main Store', active: true },
+    return res.json({
+      store: {
+        id: 'default-store',
+        name: 'Main Store',
+        location: 'Default Location',
+        active: true,
+        taxRate: 0.10,
+        currency: 'USD',
+        timezone: 'UTC',
+      },
     });
   }
   res.json({ store });
 });
 
 router.put('/store', requireRole('ADMIN', 'MANAGER'), validate(storeSettingsSchema), async (req, res) => {
-  let store = await prisma.store.findFirst();
-  if (!store) {
-    store = await prisma.store.create({ data: { name: 'Main Store', active: true } });
-  }
+  const { name, location, taxRate, currency, timezone } = req.body;
+  const updateData = {};
+  if (name !== undefined) updateData.name = name;
+  if (location !== undefined) updateData.location = location;
+  if (taxRate !== undefined) updateData.taxRate = taxRate;
+  if (currency !== undefined) updateData.currency = currency;
+  if (timezone !== undefined) updateData.timezone = timezone;
 
-  const updated = await prisma.store.update({
-    where: { id: store.id },
-    data: req.body,
-  });
+  let store = await prisma.store.findFirst();
+  let updated;
+  if (!store) {
+    updated = await prisma.store.create({
+      data: { name: name || 'Main Store', active: true, ...updateData },
+    });
+  } else {
+    updated = await prisma.store.update({
+      where: { id: store.id },
+      data: updateData,
+    });
+  }
 
   await prisma.auditLog.create({
     data: {
       actorId: req.user.id,
       action: 'UPDATE_STORE_SETTINGS',
       entityType: 'Store',
-      entityId: store.id,
-      details: { changes: req.body },
+      entityId: updated.id,
+      details: { changes: updateData },
     },
   });
 

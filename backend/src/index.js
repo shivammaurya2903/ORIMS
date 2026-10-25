@@ -26,12 +26,14 @@ import notificationRoutes from './routes/notifications.js';
 import settingsRoutes from './routes/settings.js';
 import healthRoutes from './routes/health.js';
 
-const dbUrl = (process.env.DB_PASSWORD && process.env.DB_PASSWORD.trim() !== '')
-  ? `mysql://${encodeURIComponent(process.env.DB_USER || 'root')}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST || '127.0.0.1'}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || 'orims'}`
-  : process.env.DATABASE_URL;
+const activeDbUrl = (process.env.NODE_ENV === 'test' && process.env.TEST_DATABASE_URL)
+  ? process.env.TEST_DATABASE_URL
+  : (process.env.DATABASE_URL || ((process.env.DB_PASSWORD && process.env.DB_PASSWORD.trim() !== '')
+      ? `mysql://${encodeURIComponent(process.env.DB_USER || 'root')}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST || '127.0.0.1'}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || 'orims'}`
+      : undefined));
 
 export const prisma = new PrismaClient({
-  ...(dbUrl ? { datasources: { db: { url: dbUrl } } } : {}),
+  ...(activeDbUrl ? { datasources: { db: { url: activeDbUrl } } } : {}),
   log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
 });
 

@@ -15,6 +15,7 @@ export default function POS() {
   const [success, setSuccess] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [idempotencyKey, setIdempotencyKey] = useState(() => uuidv4());
 
   const searchProducts = useCallback(async (query) => {
     if (!query || query.length < 2) {
@@ -38,6 +39,7 @@ export default function POS() {
   }, [searchQuery, searchProducts]);
 
   const addToCart = (product) => {
+    setIdempotencyKey(uuidv4());
     setCart(prev => {
       const existing = prev.find(item => item.productId === product.id);
       if (existing) {
@@ -54,6 +56,7 @@ export default function POS() {
   };
 
   const updateQuantity = (productId, quantity) => {
+    setIdempotencyKey(uuidv4());
     if (quantity <= 0) {
       setCart(prev => prev.filter(item => item.productId !== productId));
       return;
@@ -67,6 +70,7 @@ export default function POS() {
   };
 
   const removeFromCart = (productId) => {
+    setIdempotencyKey(uuidv4());
     setCart(prev => prev.filter(item => item.productId !== productId));
   };
 
@@ -78,13 +82,12 @@ export default function POS() {
   };
 
   const handleCheckout = async () => {
-    if (cart.length === 0) return;
+    if (cart.length === 0 || checkingOut) return;
     
     setCheckingOut(true);
     setError(null);
     
     try {
-      const idempotencyKey = uuidv4();
       const items = cart.map(item => ({ productId: item.productId, quantity: item.quantity }));
       const res = await api.post('/sales', { items, paymentMethod, idempotencyKey });
       
@@ -94,6 +97,7 @@ export default function POS() {
         setSuccess('Sale completed successfully!');
         setReceipt(res.data.sale);
         setCart([]);
+        setIdempotencyKey(uuidv4());
       }
     } catch (err) {
       setError(err.response?.data?.error || 'Checkout failed');
@@ -233,7 +237,7 @@ export default function POS() {
               <div className="mt-6 p-4 bg-green-50 rounded-lg border border-green-200">
                 <p className="font-medium text-green-800">Sale Complete!</p>
                 <p className="text-sm text-green-700 mt-1">Receipt: {receipt.receiptNumber}</p>
-                <button onClick={() => { setReceipt(null); setSuccess(null); }} className="mt-3 text-sm text-green-600 hover:underline">New Sale</button>
+                <button onClick={() => { setReceipt(null); setSuccess(null); setIdempotencyKey(uuidv4()); }} className="mt-3 text-sm text-green-600 hover:underline">New Sale</button>
               </div>
             )}
           </div>

@@ -8,18 +8,30 @@ import {
   expiryRiskReportSchema
 } from '../validators/reports.js';
 import { validate } from '../utils/validation.js';
+import { requireRole } from '../middleware/auth.js';
 
 const router = Router();
 
+function normalizeEndDate(dateInput) {
+  if (!dateInput) return undefined;
+  const d = new Date(dateInput);
+  if (typeof dateInput === 'string' && dateInput.length <= 10) {
+    d.setUTCHours(23, 59, 59, 999);
+  } else if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0) {
+    d.setUTCHours(23, 59, 59, 999);
+  }
+  return d;
+}
+
 // Sales report
-router.get('/sales', validate(salesReportSchema), async (req, res) => {
+router.get('/sales', requireRole('ADMIN', 'MANAGER'), validate(salesReportSchema), async (req, res) => {
   const { startDate, endDate, storeId, groupBy } = req.query;
   const targetStoreId = storeId || 'default-store';
 
   const where = {
     storeId: targetStoreId,
     status: 'COMPLETED',
-    createdAt: { gte: new Date(startDate), lte: new Date(endDate) },
+    createdAt: { gte: new Date(startDate), lte: normalizeEndDate(endDate) },
   };
 
   const sales = await prisma.sale.findMany({
@@ -73,7 +85,7 @@ router.get('/sales', validate(salesReportSchema), async (req, res) => {
 });
 
 // Inventory valuation
-router.get('/inventory-valuation', validate(inventoryValuationSchema), async (req, res) => {
+router.get('/inventory-valuation', requireRole('ADMIN', 'MANAGER'), validate(inventoryValuationSchema), async (req, res) => {
   const { storeId, categoryId, valuationMethod } = req.query;
   const targetStoreId = storeId || 'default-store';
 
@@ -112,14 +124,14 @@ router.get('/inventory-valuation', validate(inventoryValuationSchema), async (re
 });
 
 // Turnover report
-router.get('/turnover', validate(turnoverReportSchema), async (req, res) => {
+router.get('/turnover', requireRole('ADMIN', 'MANAGER'), validate(turnoverReportSchema), async (req, res) => {
   const { startDate, endDate, storeId, categoryId } = req.query;
   const targetStoreId = storeId || 'default-store';
 
   const where = {
     storeId: targetStoreId,
     status: 'COMPLETED',
-    createdAt: { gte: new Date(startDate), lte: new Date(endDate) },
+    createdAt: { gte: new Date(startDate), lte: normalizeEndDate(endDate) },
   };
 
   const saleItems = await prisma.saleItem.findMany({
@@ -173,13 +185,13 @@ router.get('/turnover', validate(turnoverReportSchema), async (req, res) => {
 });
 
 // Stock movement report
-router.get('/stock-movements', validate(stockMovementReportSchema), async (req, res) => {
+router.get('/stock-movements', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), validate(stockMovementReportSchema), async (req, res) => {
   const { startDate, endDate, storeId, productId, movementType } = req.query;
   const targetStoreId = storeId || 'default-store';
 
   const where = {
     storeId: targetStoreId,
-    createdAt: { gte: new Date(startDate), lte: new Date(endDate) },
+    createdAt: { gte: new Date(startDate), lte: normalizeEndDate(endDate) },
   };
   if (productId) where.productId = productId;
   if (movementType) where.movementType = movementType;
@@ -209,7 +221,7 @@ router.get('/stock-movements', validate(stockMovementReportSchema), async (req, 
 });
 
 // Expiry risk report
-router.get('/expiry-risk', validate(expiryRiskReportSchema), async (req, res) => {
+router.get('/expiry-risk', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), validate(expiryRiskReportSchema), async (req, res) => {
   const { storeId, daysAhead } = req.query;
   const targetStoreId = storeId || 'default-store';
   const cutoff = new Date(Date.now() + parseInt(daysAhead) * 24 * 60 * 60 * 1000);

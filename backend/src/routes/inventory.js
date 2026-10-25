@@ -3,7 +3,7 @@ import { prisma } from '../index.js';
 import { inventoryQuerySchema, adjustmentSchema, inventoryDetailQuerySchema, movementsQuerySchema } from '../validators/inventory.js';
 import { validate } from '../utils/validation.js';
 import { requireRole } from '../middleware/auth.js';
-import { NotFoundError, ValidationError } from '../middleware/errorHandler.js';
+import { NotFoundError, ValidationError, ConflictError } from '../middleware/errorHandler.js';
 import { Decimal } from '@prisma/client/runtime/library';
 
 const router = Router();
@@ -162,7 +162,7 @@ router.get('/:productId', validate(inventoryDetailQuerySchema), async (req, res)
   });
 });
 
-router.get('/:productId/movements', validate(movementsQuerySchema), async (req, res) => {
+router.get('/:productId/movements', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), validate(movementsQuerySchema), async (req, res) => {
   const { productId } = req.params;
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 50, 100);
@@ -204,50 +204,101 @@ router.post('/adjustments', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
   const { productId, storeId, quantityDelta, reason, movementType } = req.body;
   const actorId = req.user.id;
 
-  const inventory = await prisma.inventory.findUnique({
-    where: { storeId_productId: { storeId, productId } },
-  });
+  // Enforce consistent direction based on movement type
+  const isDecrease = ['ADJUSTMENT_DECREASE', 'DAMAGE', 'WASTAGE'].includes(movementType);
+  const effectiveDelta = isDecrease ? -Math.abs(quantityDelta) : Math.abs(quantityDelta);
 
-  if (!inventory) {
-    throw new NotFoundError('Inventory record not found for this product/store');
-  }
+  const result = await prisma.$transaction(async (tx) => {
+    const inventory = await tx.inventory.findUnique({
+      where: { storeId_productId: { storeId, productId } },
+    });
 
-  const newOnHand = inventory.quantityOnHand + quantityDelta;
-  if (newOnHand < 0) {
-    throw new ValidationError('Adjustment would result in negative stock');
-  }
+    if (!inventory) {
+      throw new NotFoundError('Inventory record not found for this product/store');
+    }
 
-  const [updatedInventory, movement] = await prisma.$transaction([
-    prisma.inventory.update({
+    const reserved = inventory.reservedQuantity || 0;
+    const currentOnHand = inventory.quantityOnHand;
+
+    if (effectiveDelta < 0) {
+      const decreaseAmount = Math.abs(effectiveDelta);
+      if (currentOnHand - decreaseAmount < reserved) {
+        throw new ValidationError(
+          `Adjustment would result in negative stock: would drop stock (${currentOnHand - decreaseAmount}) below reserved level (${reserved})`
+        );
+      }
+
+      // Guarded atomic conditional decrement checking both version and stock availability
+      const updateResult = await tx.inventory.updateMany({
+        where: {
+          id: inventory.id,
+          version: inventory.version,
+          quantityOnHand: { gte: decreaseAmount + reserved },
+        },
+        data: {
+          quantityOnHand: { decrement: decreaseAmount },
+          version: { increment: 1 },
+        },
+      });
+
+      if (updateResult.count === 0) {
+        throw new ConflictError('Concurrent inventory modification detected; adjustment aborted');
+      }
+    } else {
+      // Guarded atomic conditional increment checking version
+      const updateResult = await tx.inventory.updateMany({
+        where: {
+          id: inventory.id,
+          version: inventory.version,
+        },
+        data: {
+          quantityOnHand: { increment: effectiveDelta },
+          version: { increment: 1 },
+        },
+      });
+
+      if (updateResult.count === 0) {
+        throw new ConflictError('Concurrent inventory modification detected; adjustment aborted');
+      }
+    }
+
+    const updatedInventory = await tx.inventory.findUnique({
       where: { id: inventory.id },
-      data: { quantityOnHand: newOnHand, version: { increment: 1 } },
-    }),
-    prisma.stockMovement.create({
+    });
+
+    const movement = await tx.stockMovement.create({
       data: {
         storeId,
         productId,
+        inventoryId: inventory.id,
         movementType,
-        quantityDelta,
+        quantityDelta: effectiveDelta,
         reason,
         actorId,
         referenceType: 'ADJUSTMENT',
       },
-    }),
-    prisma.auditLog.create({
+    });
+
+    await tx.auditLog.create({
       data: {
         actorId,
         action: 'STOCK_ADJUSTMENT',
         entityType: 'Inventory',
         entityId: inventory.id,
-        details: { quantityDelta, reason, movementType, newOnHand },
+        details: {
+          quantityDelta: effectiveDelta,
+          reason,
+          movementType,
+          previousOnHand: currentOnHand,
+          newOnHand: updatedInventory.quantityOnHand,
+        },
       },
-    }),
-  ]);
+    });
 
-  res.json({
-    inventory: updatedInventory,
-    movement,
+    return { inventory: updatedInventory, movement };
   });
+
+  res.json(result);
 });
 
 export default router;

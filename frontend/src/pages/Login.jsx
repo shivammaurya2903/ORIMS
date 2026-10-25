@@ -117,13 +117,18 @@ export default function Login() {
             </button>
           </div>
 
+          {import.meta.env.DEV && (
+            <div className="text-center text-sm text-gray-500 mb-4">
+              <p>Demo credentials:</p>
+              <p className="font-mono text-xs">admin@orims.local / password123</p>
+              <p className="font-mono text-xs">manager@orims.local / password123</p>
+              <p className="font-mono text-xs">sales@orims.local / password123</p>
+              <p className="font-mono text-xs">inventory@orims.local / password123</p>
+            </div>
+          )}
+
           <div className="text-center text-sm text-gray-500">
-            <p>Demo credentials:</p>
-            <p className="font-mono text-xs">admin@orims.local / password123</p>
-            <p className="font-mono text-xs">manager@orims.local / password123</p>
-            <p className="font-mono text-xs">sales@orims.local / password123</p>
-            <p className="font-mono text-xs">inventory@orims.local / password123</p>
-            <p className="text-xs text-gray-400 mt-3">
+            <p className="text-xs text-gray-400">
               User accounts are provisioned and managed by store administrators in compliance with enterprise retail security policies.
             </p>
           </div>

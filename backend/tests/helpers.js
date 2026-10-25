@@ -57,11 +57,7 @@ export async function apiRequest(path, options = {}) {
   };
 }
 
-const tokenCache = {};
-
 export async function getAuthToken(role = 'ADMIN') {
-  if (tokenCache[role]) return tokenCache[role];
-
   let email = 'admin@orims.local';
   if (role === 'MANAGER') email = 'manager@orims.local';
   if (role === 'SALES_STAFF') email = 'sales@orims.local';
@@ -76,8 +72,7 @@ export async function getAuthToken(role = 'ADMIN') {
     throw new Error(`Failed to login as ${role}: ${JSON.stringify(res.body)}`);
   }
 
-  tokenCache[role] = res.body.accessToken;
-  return tokenCache[role];
+  return res.body.accessToken;
 }
 
 export { prisma };

@@ -9,6 +9,17 @@ import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
+function normalizeEndDate(dateInput) {
+  if (!dateInput) return undefined;
+  const d = new Date(dateInput);
+  if (typeof dateInput === 'string' && dateInput.length <= 10) {
+    d.setUTCHours(23, 59, 59, 999);
+  } else if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0) {
+    d.setUTCHours(23, 59, 59, 999);
+  }
+  return d;
+}
+
 const TAX_RATE = parseFloat(process.env.TAX_RATE || '0.10');
 
 router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checkoutSchema), async (req, res) => {
@@ -17,13 +28,48 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
   const storeId = 'default-store';
 
   // Check idempotency
-  const existingSale = await prisma.sale.findUnique({ where: { idempotencyKey } });
+  // Check idempotency and payload matching
+  const existingSale = await prisma.sale.findUnique({
+    where: { idempotencyKey },
+    include: { items: true },
+  });
   if (existingSale) {
+    // Check if items match existing sale
+    const existingItemsMap = new Map();
+    for (const item of existingSale.items) {
+      existingItemsMap.set(item.productId, item.quantity);
+    }
+    const incomingItemsMap = new Map();
+    for (const item of items) {
+      incomingItemsMap.set(item.productId, (incomingItemsMap.get(item.productId) || 0) + item.quantity);
+    }
+    let isMatch = existingItemsMap.size === incomingItemsMap.size;
+    if (isMatch) {
+      for (const [pid, qty] of incomingItemsMap.entries()) {
+        if (existingItemsMap.get(pid) !== qty) {
+          isMatch = false;
+          break;
+        }
+      }
+    }
+    if (!isMatch) {
+      throw new ConflictError('Idempotency key reused with mismatched payload');
+    }
     return res.json({ sale: existingSale, idempotent: true });
   }
 
+  // Aggregate duplicate product lines in request if present
+  const aggregatedItemsMap = new Map();
+  for (const item of items) {
+    aggregatedItemsMap.set(item.productId, (aggregatedItemsMap.get(item.productId) || 0) + item.quantity);
+  }
+  const aggregatedItems = Array.from(aggregatedItemsMap.entries()).map(([productId, quantity]) => ({
+    productId,
+    quantity,
+  }));
+
   // Validate products and check stock
-  const productIds = items.map(i => i.productId);
+  const productIds = aggregatedItems.map(i => i.productId);
   const products = await prisma.product.findMany({
     where: { id: { in: productIds }, active: true },
     include: {
@@ -35,11 +81,15 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
     throw new ValidationError('One or more products not found or inactive');
   }
 
+  // Load configured store tax rate or default to env
+  const store = await prisma.store.findFirst({ where: { id: storeId } });
+  const configuredTaxRate = store?.taxRate ? Number(store.taxRate) : TAX_RATE;
+
   // Check stock availability and calculate totals
   let subtotal = new Decimal(0);
   const saleItemsData = [];
 
-  for (const item of items) {
+  for (const item of aggregatedItems) {
     const product = products.find(p => p.id === item.productId);
     const inventory = product.inventory[0];
     
@@ -55,7 +105,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
     const lineSubtotal = new Decimal(product.sellingPrice).mul(item.quantity);
     const lineDiscount = new Decimal(0);
     const lineTaxable = lineSubtotal.sub(lineDiscount);
-    const lineTax = lineTaxable.mul(TAX_RATE);
+    const lineTax = lineTaxable.mul(configuredTaxRate);
     const lineTotal = lineTaxable.add(lineTax);
 
     subtotal = subtotal.add(lineSubtotal);
@@ -66,13 +116,13 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
       unitPrice: product.sellingPrice,
       unitCost: product.costPrice,
       lineDiscount: lineDiscount.toNumber(),
-      taxRate: TAX_RATE,
+      taxRate: configuredTaxRate,
       lineTotal: lineTotal.toNumber(),
     });
   }
 
   const discountTotal = new Decimal(0);
-  const taxTotal = subtotal.mul(TAX_RATE);
+  const taxTotal = subtotal.mul(configuredTaxRate);
   const total = subtotal.add(taxTotal);
 
   const receiptNumber = `RCP-${Date.now()}-${uuidv4().slice(0, 8).toUpperCase()}`;
@@ -101,7 +151,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
       });
 
       // Update inventory atomically with concurrency check and create movements
-      for (const item of items) {
+      for (const item of aggregatedItems) {
         const inv = await tx.inventory.findUnique({
           where: { storeId_productId: { storeId, productId: item.productId } },
         });
@@ -131,6 +181,7 @@ router.post('/', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), validate(checko
           data: {
             storeId,
             productId: item.productId,
+            inventoryId: inv.id,
             movementType: 'SALE',
             quantityDelta: -item.quantity,
             reason: `Sale ${receiptNumber}`,
@@ -238,7 +289,7 @@ router.get('/', validate(salesQuerySchema), async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const startDate = req.query.startDate ? new Date(req.query.startDate) : undefined;
-  const endDate = req.query.endDate ? new Date(req.query.endDate) : undefined;
+  const endDate = normalizeEndDate(req.query.endDate);
   const status = req.query.status;
   const receiptNumber = req.query.receiptNumber;
   const createdBy = req.query.createdBy;
@@ -273,9 +324,9 @@ router.get('/', validate(salesQuerySchema), async (req, res) => {
   });
 });
 
-router.get('/summary', async (req, res) => {
+router.get('/summary', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
   const startDate = req.query.startDate ? new Date(req.query.startDate) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const endDate = req.query.endDate ? new Date(req.query.endDate) : new Date();
+  const endDate = normalizeEndDate(req.query.endDate) || new Date();
   const storeId = req.query.storeId || 'default-store';
 
   const where = {
@@ -341,55 +392,94 @@ router.post('/:id/returns', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), vali
   const actorId = req.user.id;
   const storeId = 'default-store';
 
-  const sale = await prisma.sale.findUnique({
-    where: { id: saleId },
-    include: { items: true },
-  });
-
-  if (!sale) {
-    throw new NotFoundError('Sale not found');
+  // Aggregate requested return lines by saleItemId to prevent multi-line bypass
+  const aggregatedReturnsMap = new Map();
+  for (const item of items) {
+    const existing = aggregatedReturnsMap.get(item.saleItemId) || {
+      saleItemId: item.saleItemId,
+      qtyReturned: 0,
+      restockQty: 0,
+      writeOffQty: 0,
+    };
+    existing.qtyReturned += item.qtyReturned;
+    existing.restockQty += (item.restockQty || 0);
+    existing.writeOffQty += (item.writeOffQty || 0);
+    aggregatedReturnsMap.set(item.saleItemId, existing);
   }
 
-  if (sale.status === 'REFUNDED') {
-    throw new ValidationError('Sale already fully refunded');
-  }
-
-  // Validate return items
-  for (const returnItem of items) {
-    const saleItem = sale.items.find(si => si.id === returnItem.saleItemId);
-    if (!saleItem) {
-      throw new ValidationError(`Sale item ${returnItem.saleItemId} not found`);
-    }
-    
-    const alreadyReturned = await prisma.saleReturnItem.aggregate({
-      where: { saleItemId: returnItem.saleItemId },
-      _sum: { qtyReturned: true },
-    });
-    const totalReturned = alreadyReturned._sum.qtyReturned || 0;
-    if (returnItem.qtyReturned > saleItem.quantity - totalReturned) {
-      throw new ValidationError(`Cannot return more than originally sold (${saleItem.quantity - totalReturned} remaining)`);
-    }
-    if (returnItem.restockQty + returnItem.writeOffQty !== returnItem.qtyReturned) {
+  // Validate restock + write-off matches returned qty per line
+  for (const item of items) {
+    if ((item.restockQty || 0) + (item.writeOffQty || 0) !== item.qtyReturned) {
       throw new ValidationError('Restock + write-off must equal returned quantity');
     }
   }
 
   const returnRecord = await prisma.$transaction(async (tx) => {
+    // Read and lock sale with its items and return history inside transaction
+    const sale = await tx.sale.findUnique({
+      where: { id: saleId },
+      include: {
+        items: {
+          include: {
+            returnItems: true,
+          },
+        },
+      },
+    });
+
+    if (!sale) {
+      throw new NotFoundError('Sale not found');
+    }
+
+    if (sale.status === 'REFUNDED') {
+      throw new ConflictError('Sale already fully refunded');
+    }
+
+    if (sale.status === 'CANCELLED') {
+      throw new ConflictError('Cannot return items from a cancelled sale');
+    }
+
+    // Validate aggregated return quantities against remaining returnable amounts inside transaction
+    for (const [saleItemId, aggReturn] of aggregatedReturnsMap.entries()) {
+      const saleItem = sale.items.find(si => si.id === saleItemId);
+      if (!saleItem) {
+        throw new ValidationError(`Sale item ${saleItemId} not found`);
+      }
+
+      const totalAlreadyReturned = saleItem.returnItems.reduce((sum, ri) => sum + ri.qtyReturned, 0);
+      const remaining = saleItem.quantity - totalAlreadyReturned;
+
+      if (aggReturn.qtyReturned > remaining) {
+        throw new ValidationError(
+          `Cannot return more than originally sold: requested ${aggReturn.qtyReturned}, only ${remaining} remaining for line ${saleItemId}`
+        );
+      }
+    }
+
+    // Create return record with strictly schema-compliant fields
     const newReturn = await tx.saleReturn.create({
       data: {
         saleId,
         reason,
         processedBy: actorId,
-        items: { create: items },
+        items: {
+          create: items.map(i => ({
+            saleItemId: i.saleItemId,
+            qtyReturned: i.qtyReturned,
+            restockQty: i.restockQty || 0,
+            writeOffQty: i.writeOffQty || 0,
+          })),
+        },
       },
       include: { items: true },
     });
 
-    // Process inventory for restocked items
+    // Process inventory mutations and movements
     for (const returnItem of items) {
+      const saleItem = sale.items.find(si => si.id === returnItem.saleItemId);
+
       if (returnItem.restockQty > 0) {
-        const saleItem = sale.items.find(si => si.id === returnItem.saleItemId);
-        await tx.inventory.update({
+        const inv = await tx.inventory.update({
           where: { storeId_productId: { storeId, productId: saleItem.productId } },
           data: { quantityOnHand: { increment: returnItem.restockQty }, version: { increment: 1 } },
         });
@@ -398,6 +488,7 @@ router.post('/:id/returns', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), vali
           data: {
             storeId,
             productId: saleItem.productId,
+            inventoryId: inv.id,
             movementType: 'RETURN_RESTOCK',
             quantityDelta: returnItem.restockQty,
             reason: `Return ${newReturn.id} - restocked`,
@@ -407,12 +498,17 @@ router.post('/:id/returns', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), vali
           },
         });
       }
+
       if (returnItem.writeOffQty > 0) {
-        const saleItem = sale.items.find(si => si.id === returnItem.saleItemId);
+        const inv = await tx.inventory.findUnique({
+          where: { storeId_productId: { storeId, productId: saleItem.productId } },
+        });
+
         await tx.stockMovement.create({
           data: {
             storeId,
             productId: saleItem.productId,
+            inventoryId: inv?.id,
             movementType: 'RETURN_WRITE_OFF',
             quantityDelta: 0,
             reason: `Return ${newReturn.id} - written off (qty: ${returnItem.writeOffQty})`,
@@ -433,6 +529,7 @@ router.post('/:id/returns', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), vali
       const totalReturned = si.returnItems.reduce((sum, ri) => sum + ri.qtyReturned, 0);
       return totalReturned >= si.quantity;
     });
+
     if (isFullyReturned) {
       await tx.sale.update({
         where: { id: saleId },
@@ -440,17 +537,17 @@ router.post('/:id/returns', requireRole('ADMIN', 'MANAGER', 'SALES_STAFF'), vali
       });
     }
 
-    return newReturn;
-  });
+    await tx.auditLog.create({
+      data: {
+        actorId,
+        action: 'SALE_RETURN',
+        entityType: 'SaleReturn',
+        entityId: newReturn.id,
+        details: { saleId, reason, itemsCount: items.length, isFullyReturned },
+      },
+    });
 
-  await prisma.auditLog.create({
-    data: {
-      actorId,
-      action: 'CREATE_RETURN',
-      entityType: 'SaleReturn',
-      entityId: returnRecord.id,
-      details: { saleId, reason, items: items.length },
-    },
+    return newReturn;
   });
 
   res.status(201).json({ return: returnRecord });

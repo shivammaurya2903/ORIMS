@@ -15,11 +15,15 @@ export const authMiddleware = async (req, res, next) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, email: true, name: true, role: true, status: true },
+      select: { id: true, email: true, name: true, role: true, status: true, tokenVersion: true },
     });
 
     if (!user || user.status !== 'ACTIVE') {
       return res.status(401).json({ error: 'User not found or inactive', code: 'UNAUTHORIZED' });
+    }
+
+    if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== (user.tokenVersion || 0)) {
+      return res.status(401).json({ error: 'Token has been revoked', code: 'TOKEN_REVOKED' });
     }
 
     req.user = {

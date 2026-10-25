@@ -82,6 +82,7 @@ model User {
   passwordHash String
   role         UserRole
   status       UserStatus @default(ACTIVE)
+  tokenVersion Int        @default(0)
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -103,6 +104,9 @@ model Store {
   id        String   @id @default(uuid())
   name      String
   location  String?
+  taxRate   Decimal? @default(0.10) @db.Decimal(5, 4)
+  currency  String?  @default("USD")
+  timezone  String?  @default("UTC")
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

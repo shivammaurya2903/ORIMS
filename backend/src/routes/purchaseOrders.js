@@ -184,33 +184,61 @@ router.post('/:id/receive', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
   const { receiptReference, supplierDeliveryRef, items } = req.body;
   const actorId = req.user.id;
 
-  const order = await prisma.purchaseOrder.findUnique({
-    where: { id },
+  // 1. Replay idempotency: if receipt reference already exists, check if it's the exact same order receipt
+  const existingReceipt = await prisma.purchaseReceipt.findUnique({
+    where: { receiptReference },
     include: { items: true },
   });
-  if (!order) throw new NotFoundError('Purchase order not found');
-
-  if (!['SUBMITTED', 'PARTIALLY_RECEIVED'].includes(order.status)) {
-    throw new ConflictError(`Cannot receive order in ${order.status} status`);
-  }
-
-  const existingReceipt = await prisma.purchaseReceipt.findUnique({ where: { receiptReference } });
   if (existingReceipt) {
-    throw new ConflictError('Receipt reference already used');
+    if (existingReceipt.purchaseOrderId === id) {
+      // Replay of same receipt attempt - return original receipt without duplicate mutation
+      return res.json({ receipt: existingReceipt, idempotent: true });
+    }
+    throw new ConflictError('Receipt reference already used on a different order');
   }
 
+  // 2. Aggregate input items by purchaseOrderItemId to prevent duplicate line bypasses
+  const aggregatedItemsMap = new Map();
   for (const item of items) {
-    const poItem = order.items.find(oi => oi.id === item.purchaseOrderItemId);
-    if (!poItem) throw new ValidationError(`Order item ${item.purchaseOrderItemId} not found`);
-    
-    const alreadyReceived = poItem.receivedQty;
-    const remaining = poItem.orderedQty - alreadyReceived;
-    if (item.qtyReceived > remaining) {
-      throw new ValidationError(`Cannot receive more than remaining (${remaining}) for product ${poItem.productId}`);
-    }
+    const existing = aggregatedItemsMap.get(item.purchaseOrderItemId) || {
+      purchaseOrderItemId: item.purchaseOrderItemId,
+      qtyReceived: 0,
+      unitCost: item.unitCost,
+      batchNumber: item.batchNumber || null,
+      batchExpiryDate: item.batchExpiryDate || null,
+    };
+    existing.qtyReceived += item.qtyReceived;
+    aggregatedItemsMap.set(item.purchaseOrderItemId, existing);
   }
+  const aggregatedItems = Array.from(aggregatedItemsMap.values());
 
   const result = await prisma.$transaction(async (tx) => {
+    // Re-check order status inside transaction under lock
+    const order = await tx.purchaseOrder.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+    if (!order) throw new NotFoundError('Purchase order not found');
+
+    if (!['SUBMITTED', 'PARTIALLY_RECEIVED'].includes(order.status)) {
+      throw new ConflictError(`Cannot receive order in ${order.status} status`);
+    }
+
+    // Validate aggregated items against order lines inside transaction
+    for (const aggItem of aggregatedItems) {
+      const poItem = order.items.find(oi => oi.id === aggItem.purchaseOrderItemId);
+      if (!poItem) {
+        throw new ValidationError(`Order item ${aggItem.purchaseOrderItemId} not found`);
+      }
+      const remaining = poItem.orderedQty - poItem.receivedQty;
+      if (aggItem.qtyReceived > remaining) {
+        throw new ConflictError(
+          `Cannot receive ${aggItem.qtyReceived}: only ${remaining} remaining for item ${poItem.id}`
+        );
+      }
+    }
+
+    // Create purchase receipt record
     const receipt = await tx.purchaseReceipt.create({
       data: {
         purchaseOrderId: id,
@@ -234,31 +262,44 @@ router.post('/:id/receive', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
       include: { items: true },
     });
 
-    for (const item of items) {
-      const poItem = order.items.find(oi => oi.id === item.purchaseOrderItemId);
-      
-      await tx.purchaseOrderItem.update({
-        where: { id: item.purchaseOrderItemId },
-        data: { receivedQty: { increment: item.qtyReceived } },
+    // Guarded atomic increments per aggregated PO item
+    for (const aggItem of aggregatedItems) {
+      const poItem = order.items.find(oi => oi.id === aggItem.purchaseOrderItemId);
+
+      const updatePoResult = await tx.purchaseOrderItem.updateMany({
+        where: {
+          id: aggItem.purchaseOrderItemId,
+          receivedQty: { lte: poItem.orderedQty - aggItem.qtyReceived },
+        },
+        data: {
+          receivedQty: { increment: aggItem.qtyReceived },
+        },
       });
 
-      await tx.inventory.upsert({
+      if (updatePoResult.count === 0) {
+        throw new ConflictError(`Concurrent receiving race: line ${aggItem.purchaseOrderItemId} would exceed ordered quantity`);
+      }
+
+      // Upsert inventory balance atomically
+      const inv = await tx.inventory.upsert({
         where: { storeId_productId: { storeId: order.storeId, productId: poItem.productId } },
-        update: { quantityOnHand: { increment: item.qtyReceived }, version: { increment: 1 } },
+        update: { quantityOnHand: { increment: aggItem.qtyReceived }, version: { increment: 1 } },
         create: {
           storeId: order.storeId,
           productId: poItem.productId,
-          quantityOnHand: item.qtyReceived,
+          quantityOnHand: aggItem.qtyReceived,
           reservedQuantity: 0,
         },
       });
 
+      // Create stock movement referencing inventory
       await tx.stockMovement.create({
         data: {
           storeId: order.storeId,
           productId: poItem.productId,
+          inventoryId: inv.id,
           movementType: 'PURCHASE_RECEIPT',
-          quantityDelta: item.qtyReceived,
+          quantityDelta: aggItem.qtyReceived,
           reason: `Receipt ${receiptReference}`,
           actorId,
           referenceType: 'PURCHASE_RECEIPT',
@@ -266,14 +307,15 @@ router.post('/:id/receive', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
         },
       });
 
-      if (item.batchNumber && item.batchExpiryDate) {
+      // Create batch record if batch details provided
+      if (aggItem.batchNumber && aggItem.batchExpiryDate) {
         await tx.productBatch.create({
           data: {
             storeId: order.storeId,
             productId: poItem.productId,
-            batchNumber: item.batchNumber,
-            expiryDate: new Date(item.batchExpiryDate),
-            quantityOnHand: item.qtyReceived,
+            batchNumber: aggItem.batchNumber,
+            expiryDate: new Date(aggItem.batchExpiryDate),
+            quantityOnHand: aggItem.qtyReceived,
             supplierId: order.supplierId,
             purchaseOrderId: id,
           },
@@ -284,7 +326,7 @@ router.post('/:id/receive', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
     const updatedItems = await tx.purchaseOrderItem.findMany({ where: { purchaseOrderId: id } });
     const allReceived = updatedItems.every(i => i.receivedQty >= i.orderedQty);
     const anyReceived = updatedItems.some(i => i.receivedQty > 0);
-    
+
     let newStatus = order.status;
     if (allReceived) newStatus = 'RECEIVED';
     else if (anyReceived) newStatus = 'PARTIALLY_RECEIVED';
@@ -296,18 +338,20 @@ router.post('/:id/receive', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), 
       });
     }
 
-    return { receipt, newStatus };
+    await tx.auditLog.create({
+      data: {
+        actorId,
+        action: 'RECEIVE_PURCHASE_ORDER',
+        entityType: 'PurchaseOrder',
+        entityId: id,
+        details: { receiptReference, itemsCount: items.length, newStatus },
+      },
+    });
+
+    return { receipt, newStatus, order };
   });
 
-  await prisma.auditLog.create({
-    data: {
-      actorId,
-      action: 'RECEIVE_PURCHASE_ORDER',
-      entityType: 'PurchaseOrder',
-      entityId: id,
-      details: { receiptReference, itemsCount: items.length },
-    },
-  });
+  const { receipt, newStatus, order } = result;
 
   for (const item of items) {
     if (item.qtyReceived > 0) {

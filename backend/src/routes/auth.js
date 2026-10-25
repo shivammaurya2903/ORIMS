@@ -9,13 +9,14 @@ import { authMiddleware } from '../middleware/auth.js';
 const router = Router();
 
 const generateTokens = (user) => {
+  const tokenVersion = user.tokenVersion !== undefined ? user.tokenVersion : 0;
   const accessToken = jwt.sign(
-    { id: user.id, email: user.email, name: user.name, role: user.role },
+    { id: user.id, email: user.email, name: user.name, role: user.role, tokenVersion },
     process.env.JWT_ACCESS_SECRET,
     { expiresIn: process.env.JWT_ACCESS_EXPIRY || '15m' }
   );
   const refreshToken = jwt.sign(
-    { id: user.id, type: 'refresh' },
+    { id: user.id, type: 'refresh', tokenVersion },
     process.env.JWT_REFRESH_SECRET,
     { expiresIn: process.env.JWT_REFRESH_EXPIRY || '7d' }
   );
@@ -61,12 +62,7 @@ router.post('/login', validate(loginSchema), async (req, res) => {
     return res.status(401).json({ error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
   }
 
-  const { accessToken, refreshToken } = generateTokens({
-    id: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
-  });
+  const { accessToken, refreshToken } = generateTokens(user);
 
   setTokenCookies(res, accessToken, refreshToken);
 
@@ -92,7 +88,49 @@ router.post('/login', validate(loginSchema), async (req, res) => {
   });
 });
 
-router.post('/logout', (_req, res) => {
+router.post('/logout', async (req, res) => {
+  // Invalidate session server-side by incrementing user's tokenVersion
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const token = req.cookies?.accessToken || bearerToken;
+  let actorId = null;
+
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+      actorId = decoded.id;
+    } catch {
+      // If access token expired, try decode refresh token
+      const refreshToken = req.cookies?.refreshToken;
+      if (refreshToken) {
+        try {
+          const decodedRefresh = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+          actorId = decodedRefresh.id;
+        } catch {
+          // ignore invalid token
+        }
+      }
+    }
+  }
+
+  if (actorId) {
+    await prisma.user.update({
+      where: { id: actorId },
+      data: { tokenVersion: { increment: 1 } },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorId,
+        action: 'LOGOUT',
+        entityType: 'User',
+        entityId: actorId,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      },
+    });
+  }
+
   clearTokenCookies(res);
   res.json({ message: 'Logged out successfully' });
 });
@@ -130,19 +168,21 @@ router.post('/refresh', async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, email: true, name: true, role: true, status: true },
+      select: { id: true, email: true, name: true, role: true, status: true, tokenVersion: true },
     });
 
     if (!user || user.status !== 'ACTIVE') {
+      clearTokenCookies(res);
       return res.status(401).json({ error: 'User not found or inactive', code: 'UNAUTHORIZED' });
     }
 
-    const tokens = generateTokens({
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-    });
+    // Verify refresh token revocation state
+    if (decoded.tokenVersion !== undefined && decoded.tokenVersion !== (user.tokenVersion || 0)) {
+      clearTokenCookies(res);
+      return res.status(401).json({ error: 'Refresh token has been revoked', code: 'TOKEN_REVOKED' });
+    }
+
+    const tokens = generateTokens(user);
 
     setTokenCookies(res, tokens.accessToken, tokens.refreshToken);
 

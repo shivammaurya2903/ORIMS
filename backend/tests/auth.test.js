@@ -65,10 +65,28 @@ describe('Auth & Authorization Suite', () => {
   });
 
   it('POST /api/v1/auth/logout succeeds and returns 200', async () => {
-    const token = await getAuthToken('ADMIN');
+    const adminToken = await getAuthToken('ADMIN');
+    const uniqueEmail = `logout_user_${Date.now()}@orims.local`;
+    await apiRequest('/api/v1/users', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        name: 'Logout Test User',
+        email: uniqueEmail,
+        password: 'password123',
+        role: 'INVENTORY_STAFF',
+      },
+    });
+
+    const loginRes = await apiRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: uniqueEmail, password: 'password123' },
+    });
+    const userToken = loginRes.body.accessToken;
+
     const res = await apiRequest('/api/v1/auth/logout', {
       method: 'POST',
-      token,
+      token: userToken,
     });
     expect(res.status).toBe(200);
     expect(res.body.message).toMatch(/Logged out successfully/i);

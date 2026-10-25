@@ -47,24 +47,28 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", f"v{datetime.now().strftime('%Y%m%d_%
 
 def compute_baseline_predictions(
     df_clean: pd.DataFrame,
-    train_end_idx: int,
-    val_end_idx: int,
+    train_mask: np.ndarray,
+    test_mask: np.ndarray,
     y_test: np.ndarray
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Computes genuine retail baselines on the holdout test set:
-    1. 7-Day Moving Average Baseline (historical product mean)
+    1. 7-Day Moving Average Baseline (trailing 7-day average per product)
     2. Day-of-Week Naive Baseline (historical product mean per day-of-week)
     """
-    df_train = df_clean.iloc[:train_end_idx]
-    df_test = df_clean.iloc[val_end_idx:]
+    df_train = df_clean[train_mask]
+    df_test = df_clean[test_mask]
 
-    # Baseline 1: Recent moving average per product
+    # Baseline 1: Trailing 7-day moving average per product from training window
+    unique_train_dates = np.sort(df_train['date'].unique())
+    last_7_dates = unique_train_dates[-7:] if len(unique_train_dates) >= 7 else unique_train_dates
+    df_train_last_7 = df_train[df_train['date'].isin(last_7_dates)]
+    trailing_7_means = df_train_last_7.groupby('product_id')['demand'].mean().to_dict()
     product_means = df_train.groupby('product_id')['demand'].mean().to_dict()
     global_mean = float(df_train['demand'].mean()) if len(df_train) > 0 else 1.0
 
     ma_preds = np.array([
-        product_means.get(pid, global_mean) for pid in df_test['product_id']
+        trailing_7_means.get(pid, product_means.get(pid, global_mean)) for pid in df_test['product_id']
     ], dtype=np.float32)
     ma_metrics = evaluate_model(y_test, ma_preds)
 
@@ -101,20 +105,33 @@ def train_model(max_items: int = 50, max_days: int = 365) -> Tuple[HistGradientB
     if n_samples < 50:
         raise ValueError(f"Insufficient training samples ({n_samples}) to fit model reliably.")
 
-    # 3. Chronological Train / Validation / Test Split (no random splitting)
-    # 80% train, 10% validation, 10% test holdout
-    train_end = int(n_samples * 0.80)
-    val_end = int(n_samples * 0.90)
+    # 3. Chronological Train / Validation / Test Split by Unique Dates (no row-index slicing)
+    unique_dates = np.sort(df_clean['date'].unique())
+    n_dates = len(unique_dates)
+    if n_dates < 10:
+        raise ValueError(f"Insufficient unique dates ({n_dates}) for time-series splitting.")
 
-    X_train, y_train = X[:train_end], y[:train_end]
-    X_val, y_val = X[train_end:val_end], y[train_end:val_end]
-    X_test, y_test = X[val_end:], y[val_end:]
+    train_dates = unique_dates[:int(n_dates * 0.80)]
+    val_dates = unique_dates[int(n_dates * 0.80):int(n_dates * 0.90)]
+    test_dates = unique_dates[int(n_dates * 0.90):]
 
-    logger.info(f"Chronological split -> Train: {len(X_train)}, Val: {len(X_val)}, Test: {len(X_test)}")
+    train_mask = df_clean['date'].isin(train_dates).values
+    val_mask = df_clean['date'].isin(val_dates).values
+    test_mask = df_clean['date'].isin(test_dates).values
+
+    X_train, y_train = X[train_mask], y[train_mask]
+    X_val, y_val = X[val_mask], y[val_mask]
+    X_test, y_test = X[test_mask], y[test_mask]
+
+    logger.info(
+        f"Chronological date split -> Train dates: {len(train_dates)} (samples: {len(X_train)}), "
+        f"Val dates: {len(val_dates)} (samples: {len(X_val)}), "
+        f"Test dates: {len(test_dates)} (samples: {len(X_test)})"
+    )
 
     # 4. Evaluate Baselines on the test split
     baseline_ma_metrics, baseline_dow_metrics = compute_baseline_predictions(
-        df_clean, train_end, val_end, y_test
+        df_clean, train_mask, test_mask, y_test
     )
     logger.info(f"Baseline Moving Average -> MAE: {baseline_ma_metrics['mae']}, WAPE: {baseline_ma_metrics['wape']}")
     logger.info(f"Baseline Day-of-Week    -> MAE: {baseline_dow_metrics['mae']}, WAPE: {baseline_dow_metrics['wape']}")

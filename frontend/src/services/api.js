@@ -12,11 +12,10 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
-    // Do not attempt refresh on auth check or auth action endpoints
+    // Do not attempt refresh on login, refresh, or logout action endpoints
     const isAuthRoute =
       originalRequest?.url?.includes('/auth/login') ||
       originalRequest?.url?.includes('/auth/refresh') ||
-      originalRequest?.url?.includes('/auth/me') ||
       originalRequest?.url?.includes('/auth/logout');
     
     if (error.response?.status === 401 && !originalRequest._retry && !isAuthRoute) {
