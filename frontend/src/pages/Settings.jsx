@@ -8,7 +8,7 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('store');
   const [saving, setSaving] = useState(false);
-  const [storeForm, setStoreForm] = useState({ name: '', location: '', taxRate: 0.10, currency: 'USD', timezone: 'UTC' });
+  const [storeForm, setStoreForm] = useState({ name: '', location: '', taxRate: 0.10, currency: 'INR', timezone: 'Asia/Kolkata' });
   const [policyForm, setPolicyForm] = useState({ productId: '', safetyStock: 0, serviceLevel: 0.95, reviewPeriod: 7, minLevel: '', maxLevel: '' });
   const [editingPolicy, setEditingPolicy] = useState(null);
 
@@ -28,8 +28,8 @@ export default function Settings() {
           name: st.name || '',
           location: st.location || '',
           taxRate: st.taxRate !== null && st.taxRate !== undefined ? Number(st.taxRate) : 0.10,
-          currency: st.currency || 'USD',
-          timezone: st.timezone || 'UTC',
+          currency: st.currency || 'INR',
+          timezone: st.timezone || 'Asia/Kolkata',
         });
       }
     } catch (err) {
@@ -65,8 +65,8 @@ export default function Settings() {
         name: storeForm.name.trim(),
         location: storeForm.location?.trim() || null,
         taxRate: !isNaN(storeForm.taxRate) ? Number(storeForm.taxRate) : 0.10,
-        currency: storeForm.currency?.trim()?.toUpperCase() || 'USD',
-        timezone: storeForm.timezone?.trim() || 'UTC',
+        currency: storeForm.currency?.trim()?.toUpperCase() || 'INR',
+        timezone: storeForm.timezone?.trim() || 'Asia/Kolkata',
       };
       await api.put('/settings/store', payload);
       await fetchStore();

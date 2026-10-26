@@ -17,8 +17,8 @@ router.get('/store', async (req, res) => {
         location: 'Default Location',
         active: true,
         taxRate: 0.10,
-        currency: 'USD',
-        timezone: 'UTC',
+        currency: 'INR',
+        timezone: 'Asia/Kolkata',
       },
     });
   }

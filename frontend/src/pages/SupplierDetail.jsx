@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 
 export default function SupplierDetail() {
   const { id } = useParams();
@@ -168,7 +169,7 @@ export default function SupplierDetail() {
                           <td>{sp.leadTimeDays} days</td>
                           <td>{sp.minOrderQty}</td>
                           <td>{sp.packMultiple}</td>
-                          <td>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(sp.unitCost)}</td>
+                          <td>{formatCurrency(sp.unitCost)}</td>
                           <td><span className={`badge ${sp.active ? 'badge-green' : 'badge-gray'}`}>{sp.active ? 'Active' : 'Inactive'}</span></td>
                         </tr>
                       ))}

@@ -151,22 +151,29 @@ describe('ML Release Remediation Test Suite', () => {
     });
 
     it('truthfully reports FALLBACK_ONLY when ML service is offline and does not claim full success', async () => {
-      const res = await apiRequest('/api/v1/optimization/recalculate', {
-        method: 'POST',
-        token: adminToken,
-        body: {
-          storeId: testStoreId,
-          productIds: [batchProductA.id, batchProductB.id],
-        },
-      });
+      const origUrl = process.env.ML_SERVICE_URL;
+      process.env.ML_SERVICE_URL = 'http://127.0.0.1:59999';
+      try {
+        const res = await apiRequest('/api/v1/optimization/recalculate', {
+          method: 'POST',
+          token: adminToken,
+          body: {
+            storeId: testStoreId,
+            productIds: [batchProductA.id, batchProductB.id],
+          },
+        });
 
-      expect(res.status).toBe(200);
-      expect(res.body.runStatus).toBe('FALLBACK_ONLY');
-      expect(res.body.modelForecastsCount).toBe(0);
-      expect(res.body.fallbackForecastsCount).toBe(2);
-      expect(res.body.productsProcessed).toBe(2);
-      expect(res.body.forecastsGenerated).toBe(14); // 7 days * 2 products
-      expect(res.body.recommendationsGenerated).toBe(2);
+        expect(res.status).toBe(200);
+        expect(res.body.runStatus).toBe('FALLBACK_ONLY');
+        expect(res.body.modelForecastsCount).toBe(0);
+        expect(res.body.fallbackForecastsCount).toBe(2);
+        expect(res.body.productsProcessed).toBe(2);
+        expect(res.body.forecastsGenerated).toBe(14); // 7 days * 2 products
+        expect(res.body.recommendationsGenerated).toBe(2);
+      } finally {
+        if (origUrl !== undefined) process.env.ML_SERVICE_URL = origUrl;
+        else delete process.env.ML_SERVICE_URL;
+      }
     });
 
     it('persists quantile forecast columns idempotently without duplicates on repeated runs', async () => {

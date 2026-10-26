@@ -76,12 +76,14 @@ async function handleSalesReport(req, res, isExport = false) {
   });
 
   if (isExport || format === 'csv') {
+    const store = await prisma.store.findUnique({ where: { id: targetStoreId }, select: { currency: true } });
+    const curr = store?.currency || 'INR';
     const columns = [
       { key: 'period', label: 'Period' },
-      { key: 'revenue', label: 'Revenue ($)' },
+      { key: 'revenue', label: `Revenue (${curr})` },
       { key: 'orders', label: 'Orders' },
       { key: 'units', label: 'Units Sold' },
-      { key: 'avgOrderValue', label: 'Avg Order Value ($)' },
+      { key: 'avgOrderValue', label: `Avg Order Value (${curr})` },
     ];
     const csv = formatToCsv(columns, data);
     return sendCsvResponse(res, `sales-report-${startDate}-to-${endDate}.csv`, csv);
@@ -197,14 +199,16 @@ async function handleInventoryValuation(req, res, isExport = false) {
   });
 
   if (isExport || format === 'csv') {
+    const store = await prisma.store.findUnique({ where: { id: targetStoreId }, select: { currency: true } });
+    const curr = store?.currency || 'INR';
     const columns = [
       { key: 'sku', label: 'SKU' },
       { key: 'name', label: 'Product Name' },
       { key: 'category', label: 'Category' },
       { key: 'onHand', label: 'On Hand' },
-      { key: 'unitCost', label: 'Unit Cost ($)' },
+      { key: 'unitCost', label: `Unit Cost (${curr})` },
       { key: 'costBasis', label: 'Costing Basis' },
-      { key: 'totalValue', label: 'Total Value ($)' },
+      { key: 'totalValue', label: `Total Value (${curr})` },
     ];
     const csv = formatToCsv(columns, data);
     return sendCsvResponse(res, `inventory-valuation-${valuationMethod.toLowerCase()}-${new Date().toISOString().split('T')[0]}.csv`, csv);
@@ -281,12 +285,14 @@ async function handleTurnoverReport(req, res, isExport = false) {
   }));
 
   if (isExport || format === 'csv') {
+    const store = await prisma.store.findUnique({ where: { id: targetStoreId }, select: { currency: true } });
+    const curr = store?.currency || 'INR';
     const columns = [
       { key: r => r.product?.sku || '', label: 'SKU' },
       { key: r => r.product?.name || '', label: 'Product Name' },
       { key: 'unitsSold', label: 'Units Sold' },
-      { key: r => Number(r.revenue.toFixed(2)), label: 'Revenue ($)' },
-      { key: r => Number(r.cogs.toFixed(2)), label: 'COGS ($)' },
+      { key: r => Number(r.revenue.toFixed(2)), label: `Revenue (${curr})` },
+      { key: r => Number(r.cogs.toFixed(2)), label: `COGS (${curr})` },
       { key: r => Number(r.turnover.toFixed(2)), label: 'Turnover Ratio' },
       { key: r => `${(r.grossMargin * 100).toFixed(1)}%`, label: 'Gross Margin' },
     ];
@@ -392,6 +398,8 @@ async function handleExpiryRiskReport(req, res, isExport = false) {
   }));
 
   if (isExport || format === 'csv') {
+    const store = await prisma.store.findUnique({ where: { id: targetStoreId }, select: { currency: true } });
+    const curr = store?.currency || 'INR';
     const columns = [
       { key: 'batchNumber', label: 'Batch Number' },
       { key: r => r.product?.sku || '', label: 'SKU' },
@@ -399,7 +407,7 @@ async function handleExpiryRiskReport(req, res, isExport = false) {
       { key: 'quantityOnHand', label: 'Quantity On Hand' },
       { key: r => new Date(r.expiryDate).toISOString().split('T')[0], label: 'Expiry Date' },
       { key: 'daysUntilExpiry', label: 'Days Until Expiry' },
-      { key: 'valueAtRisk', label: 'Value At Risk ($)' },
+      { key: 'valueAtRisk', label: `Value At Risk (${curr})` },
       { key: 'status', label: 'Status' },
     ];
     const csv = formatToCsv(columns, data);

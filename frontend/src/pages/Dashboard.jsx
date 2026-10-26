@@ -119,11 +119,11 @@ export default function Dashboard() {
                   <XAxis 
                     dataKey="period" 
                     tick={{ fontSize: 12, fill: '#6b7280' }}
-                    tickFormatter={(value) => new Date(value).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    tickFormatter={(value) => new Date(value).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' })}
                   />
                   <YAxis 
                     tick={{ fontSize: 12, fill: '#6b7280' }}
-                    tickFormatter={(value) => '$' + (value/1000).toFixed(0) + 'k'}
+                    tickFormatter={(value) => '₹' + (value >= 1000 ? (value/1000).toFixed(0) + 'k' : value)}
                   />
                   <Tooltip 
                     formatter={(value) => [formatCurrency(value), 'Revenue']}

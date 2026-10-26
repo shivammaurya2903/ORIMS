@@ -1,5 +1,16 @@
 import os
+import warnings
 from pathlib import Path
+
+# Silence loky/joblib wmic CPU detection warning on modern Windows
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
+try:
+    import joblib.externals.loky.backend.context as _loky_context
+    _loky_context.physical_cores_cache = os.cpu_count() or 4
+except Exception:
+    pass
+
+warnings.filterwarnings("ignore", message=r".*Could not find the number of physical cores.*", category=UserWarning)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'data'

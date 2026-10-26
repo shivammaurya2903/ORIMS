@@ -265,7 +265,7 @@ function SalesReportTab({ report, loading, exporting, filters, setFilters, onFet
                   <LineChart data={report.data}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="period" tick={{ fontSize: 12, fill: '#6b7280' }} />
-                    <YAxis tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={(v) => '$' + (v/1000).toFixed(0) + 'k'} />
+                    <YAxis tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={(v) => '₹' + (v >= 1000 ? (v/1000).toFixed(0) + 'k' : v)} />
                     <Tooltip formatter={(v) => [formatCurrency(v), 'Revenue']} contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px' }} />
                     <Line type="monotone" dataKey="revenue" stroke="#3b82f6" strokeWidth={2} dot={false} />
                   </LineChart>

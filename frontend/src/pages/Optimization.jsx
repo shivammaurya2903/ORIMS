@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { formatCurrency } from '../utils/format';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 
 const getRiskBadge = (risk) => {
@@ -397,7 +398,7 @@ function SlowMovingTab({ slowMoving }) {
                   <td>{item.product?.category?.name}</td>
                   <td>{item.onHand}</td>
                   <td>{item.daysSinceLastSale}</td>
-                  <td>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(item.inventoryValue)}</td>
+                  <td>{formatCurrency(item.inventoryValue)}</td>
                 </tr>
               ))
             )}
@@ -435,7 +436,7 @@ function ExpiryRiskTab({ expiryRisk }) {
                   <td>{item.batch?.expiryDate ? new Date(item.batch?.expiryDate).toLocaleDateString() : new Date(item.expiryDate).toLocaleDateString()}</td>
                   <td>{item.daysUntilExpiry}</td>
                   <td>{item.batch?.quantityOnHand || item.quantityOnHand}</td>
-                  <td>{new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(item.valueAtRisk)}</td>
+                  <td>{formatCurrency(item.valueAtRisk)}</td>
                   <td><span className={`badge ${item.riskLevel === 'EXPIRED' ? 'badge-red' : item.riskLevel === 'CRITICAL' ? 'badge-yellow' : 'badge-blue'}`}>{item.riskLevel}</span></td>
                 </tr>
               ))

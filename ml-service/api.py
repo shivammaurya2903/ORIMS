@@ -10,7 +10,19 @@ Features:
 """
 
 import os
+import warnings
+
+# On modern Windows (Windows 11+), wmic.exe is deprecated/uninstalled by default.
+# Pre-populating loky's physical_cores_cache and setting LOKY_MAX_CPU_COUNT completely prevents WinError 2.
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
+try:
+    import joblib.externals.loky.backend.context as _loky_context
+    _loky_context.physical_cores_cache = os.cpu_count() or 4
+except Exception:
+    pass
+
+warnings.filterwarnings("ignore", message=r".*Could not find the number of physical cores.*", category=UserWarning)
+
 import json
 import logging
 from contextlib import asynccontextmanager

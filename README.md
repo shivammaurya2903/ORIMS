@@ -277,6 +277,16 @@ The seed script creates four development users. All use the password **`password
 
 **Security warning:** these accounts are for local development only. Change or remove them, set strong JWT secrets, disable `VITE_SHOW_DEMO_CREDENTIALS`, and rotate the ML API key before exposing ORIMS to any shared or production environment.
 
+## Demo dataset & Indian Rupee (INR) configuration
+
+The demo seed script (`npm run db:seed`) initializes a realistic 5-day retail shop dataset:
+- **Default Store Configuration:** Currency is **INR (₹)** with `en-IN` locale formatting and timezone **`Asia/Kolkata`**.
+- **Believable Catalog Pricing:** Products denominated in Indian Rupees (e.g. ₹399–₹2,999) with realistic wholesale costs and margins.
+- **5 Consecutive Days of Sales:** 58 completed transactions spread realistically across operating hours with natural basket sizes and Indian retail payment methods (UPI, Card, Cash).
+- **Stock & Ledger Consistency:** Physical inventory balances and `StockMovement` audit ledger records are atomically maintained and fully reconciled.
+- **Idempotency Guarantee:** Running `npm run db:seed` multiple times is deterministic and safe; it refreshes demo fixture records (`DEMO-SALE-*`) without corrupting stock or creating duplicates.
+- **ML Distinction:** The 5-day sales history serves operational workflow demonstration; model training remains isolated using benchmark dataset artifacts.
+
 ## Available scripts
 
 Run these from the repository root.
