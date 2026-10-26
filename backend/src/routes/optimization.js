@@ -363,7 +363,7 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     const mlProdResult = forecastData?.predictions?.find(p => p.product_id === product.id);
     if (mlProdResult && mlProdResult.status !== 'error' && mlProdResult.predictions?.length > 0) {
       productPreds = mlProdResult.predictions;
-      const validMethods = ['MODEL', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK'];
+      const validMethods = ['MODEL', 'MODEL_QUANTILE', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK'];
       forecastMethod = validMethods.includes(mlProdResult.method) ? mlProdResult.method : 'MODEL';
     } else {
       // Fallback moving average

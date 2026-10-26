@@ -48,7 +48,7 @@ export const forecastsQuerySchema = z.object({
     storeId: z.string().min(1).optional(),
     productId: z.string().uuid().optional(),
     modelVersion: z.string().optional(),
-    forecastMethod: z.enum(['MODEL', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK']).optional(),
+    forecastMethod: z.enum(['MODEL', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK', 'MODEL_QUANTILE', 'MODEL_QUANTILE']).optional(),
     startDate: dateRefinement.optional(),
     endDate: dateRefinement.optional(),
   }),

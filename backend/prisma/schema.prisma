@@ -438,6 +438,12 @@ model Forecast {
   horizonDays       Int           @default(7)
   runId             String
   predictedDemand   Float
+  predictedDemandP50 Float?
+  predictedDemandP90 Float?
+  predictedDemandP95 Float?
+  stockoutProbability Float?
+  daysOfSupply      Float?
+  stockoutRiskLevel String?
   modelVersion      String
   forecastMethod    ForecastMethod @default(MODEL)
   generatedAt       DateTime      @default(now())
@@ -505,6 +511,9 @@ model OptimizationRecommendation {
   reviewReason      String?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
+  reorderPoint      Int?
+  stockoutProbability Float?
+  daysOfSupply      Float?
 
   @@index([storeId, productId])
   @@index([status])

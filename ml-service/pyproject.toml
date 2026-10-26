@@ -1,7 +1,7 @@
 [project]
 name = "orims-ml-service"
-version = "1.0.0"
-description = "ORIMS ML Forecasting Service"
+version = "2.0.0"
+description = "ORIMS ML Forecasting and Stockout Prediction Service"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
@@ -19,7 +19,14 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.0",
+    "pytest-asyncio>=0.23.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+    "ignore::PendingDeprecationWarning",
+]

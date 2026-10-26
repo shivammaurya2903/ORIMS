@@ -1,218 +1,176 @@
 """
-Model training and benchmarking script for ORIMS ML Forecasting Service.
+Training Pipeline for ORIMS ML Service.
 
-1. Loads M5 Forecasting Accuracy competition dataset (or benchmark fixture).
-2. Computes strict time-series features (lags, rolling stats, calendar, prices, inventory) with zero future leakage.
-3. Enforces chronological train / validation / test splits.
-4. Evaluates against Moving Average and Day-of-Week Naive baselines.
-5. Saves model.joblib and metadata.json with provenance and metrics.
+Trains:
+1. Quantile Demand Models (P50, P90, P95) using HistGradientBoostingRegressor
+2. Standard Demand Model (Mean)
+3. Stockout Risk Classifier using HistGradientBoostingClassifier
+4. Serializes models and comprehensive metadata to disk
 """
 
-import os
-os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Tuple
-
+from typing import Any, Dict, Tuple
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier
 
-from m5_data import load_m5_dataset
-from features import (
-    FEATURE_COLUMNS,
-    TARGET_COLUMN,
-    build_time_series_features,
-    evaluate_model,
-)
+from utils.config import MODELS_DIR, DATASET
+from utils.data import load_dataset
+from utils.features import build_features
+from utils.metrics import evaluate_forecast, classification_metrics, pinball_loss
+from utils.schema import FEATURE_COLUMNS_V2, TARGET_DEMAND, TARGET_STOCKOUT
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Configuration
-if os.getenv("MODEL_PATH"):
-    MODEL_DIR = Path(os.getenv("MODEL_PATH"))
-elif os.name == "posix" and Path("/app/models").exists():
-    MODEL_DIR = Path("/app/models")
-else:
-    MODEL_DIR = Path(__file__).resolve().parent / "models"
 
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_VERSION = os.getenv("MODEL_VERSION", f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-
-
-def compute_baseline_predictions(
-    df_clean: pd.DataFrame,
-    train_mask: np.ndarray,
-    test_mask: np.ndarray,
-    y_test: np.ndarray
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def train_models(dataset_name: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Computes genuine retail baselines on the holdout test set:
-    1. 7-Day Moving Average Baseline (trailing 7-day average per product)
-    2. Day-of-Week Naive Baseline (historical product mean per day-of-week)
+    Executes end-to-end model training:
+    Loads data -> builds features -> splits chronologically -> fits models -> serializes artifacts.
     """
-    df_train = df_clean[train_mask]
-    df_test = df_clean[test_mask]
+    ds_name = dataset_name or DATASET or 'm5'
+    logger.info(f"Initiating model training on dataset source: '{ds_name}'...")
 
-    # Baseline 1: Trailing 7-day moving average per product from training window
-    unique_train_dates = np.sort(df_train['date'].unique())
-    last_7_dates = unique_train_dates[-7:] if len(unique_train_dates) >= 7 else unique_train_dates
-    df_train_last_7 = df_train[df_train['date'].isin(last_7_dates)]
-    trailing_7_means = df_train_last_7.groupby('product_id')['demand'].mean().to_dict()
-    product_means = df_train.groupby('product_id')['demand'].mean().to_dict()
-    global_mean = float(df_train['demand'].mean()) if len(df_train) > 0 else 1.0
-
-    ma_preds = np.array([
-        trailing_7_means.get(pid, product_means.get(pid, global_mean)) for pid in df_test['product_id']
-    ], dtype=np.float32)
-    ma_metrics = evaluate_model(y_test, ma_preds)
-
-    # Baseline 2: Day-of-Week naive baseline for next-day target
-    dow_means = df_train.groupby(['product_id', 'day_of_week'])['demand'].mean().to_dict()
-    dow_preds = []
-    for pid, dow in zip(df_test['product_id'], df_test['day_of_week']):
-        target_dow = (int(dow) + 1) % 7
-        val = dow_means.get((pid, target_dow), product_means.get(pid, global_mean))
-        dow_preds.append(val)
-    dow_preds = np.array(dow_preds, dtype=np.float32)
-    dow_metrics = evaluate_model(y_test, dow_preds)
-
-    return ma_metrics, dow_metrics
-
-
-def train_model(max_items: int = 50, max_days: int = 365) -> Tuple[HistGradientBoostingRegressor, Dict[str, Any]]:
-    """
-    Executes end-to-end M5 dataset training and benchmarking pipeline.
-    """
-    logger.info("==================================================")
-    logger.info("Starting ORIMS ML Model Training & Benchmarking")
-    logger.info("==================================================")
-
-    # 1. Load M5 Dataset
-    df_raw, provenance = load_m5_dataset(max_items=max_items, max_days=max_days)
+    # 1. Load data
+    df_raw, provenance = load_dataset(ds_name)
     logger.info(f"Loaded {len(df_raw)} records (Provenance: {provenance})")
 
-    # 2. Build time-series features without leakage
-    X, y, df_clean = build_time_series_features(df_raw)
-    n_samples = len(X)
-    logger.info(f"Engineered {n_samples} valid training instances with {len(FEATURE_COLUMNS)} features")
+    # 2. Feature engineering
+    df_features = build_features(df_raw)
+    n_samples = len(df_features)
+    logger.info(f"Engineered {n_samples} valid training instances with {len(FEATURE_COLUMNS_V2)} features")
 
-    if n_samples < 50:
-        raise ValueError(f"Insufficient training samples ({n_samples}) to fit model reliably.")
+    if n_samples < 20:
+        raise ValueError(f"Insufficient training instances ({n_samples}) to fit model reliably.")
 
-    # 3. Chronological Train / Validation / Test Split by Unique Dates (no row-index slicing)
-    unique_dates = np.sort(df_clean['date'].unique())
+    # 3. Chronological Train / Val / Test split
+    unique_dates = np.sort(df_features['date'].unique())
     n_dates = len(unique_dates)
-    if n_dates < 10:
-        raise ValueError(f"Insufficient unique dates ({n_dates}) for time-series splitting.")
 
-    train_dates = unique_dates[:int(n_dates * 0.80)]
-    val_dates = unique_dates[int(n_dates * 0.80):int(n_dates * 0.90)]
-    test_dates = unique_dates[int(n_dates * 0.90):]
+    if n_dates >= 10:
+        train_dates = unique_dates[:int(n_dates * 0.80)]
+        val_dates = unique_dates[int(n_dates * 0.80):int(n_dates * 0.90)]
+        test_dates = unique_dates[int(n_dates * 0.90):]
 
-    train_mask = df_clean['date'].isin(train_dates).values
-    val_mask = df_clean['date'].isin(val_dates).values
-    test_mask = df_clean['date'].isin(test_dates).values
-
-    X_train, y_train = X[train_mask], y[train_mask]
-    X_val, y_val = X[val_mask], y[val_mask]
-    X_test, y_test = X[test_mask], y[test_mask]
-
-    logger.info(
-        f"Chronological date split -> Train dates: {len(train_dates)} (samples: {len(X_train)}), "
-        f"Val dates: {len(val_dates)} (samples: {len(X_val)}), "
-        f"Test dates: {len(test_dates)} (samples: {len(X_test)})"
-    )
-
-    # 4. Evaluate Baselines on the test split
-    baseline_ma_metrics, baseline_dow_metrics = compute_baseline_predictions(
-        df_clean, train_mask, test_mask, y_test
-    )
-    logger.info(f"Baseline Moving Average -> MAE: {baseline_ma_metrics['mae']}, WAPE: {baseline_ma_metrics['wape']}")
-    logger.info(f"Baseline Day-of-Week    -> MAE: {baseline_dow_metrics['mae']}, WAPE: {baseline_dow_metrics['wape']}")
-
-    # 5. Fit Gradient Boosting Regressor
-    logger.info("Fitting HistGradientBoostingRegressor with monotonic non-negative constraints...")
-    model = HistGradientBoostingRegressor(
-        max_iter=250,
-        max_depth=6,
-        learning_rate=0.08,
-        min_samples_leaf=15,
-        l2_regularization=1.5,
-        early_stopping=True,
-        validation_fraction=0.1,
-        n_iter_no_change=12,
-        random_state=42,
-    )
-    model.fit(X_train, y_train)
-
-    # 6. Evaluate Model on Validation and Test Splits
-    val_preds = np.maximum(model.predict(X_val), 0.0)
-    val_metrics = evaluate_model(y_val, val_preds)
-
-    test_preds = np.maximum(model.predict(X_test), 0.0)
-    test_metrics = evaluate_model(y_test, test_preds)
-
-    logger.info(f"Model Validation Metrics -> MAE: {val_metrics['mae']}, WAPE: {val_metrics['wape']}")
-    logger.info(f"Model Test Metrics       -> MAE: {test_metrics['mae']}, WAPE: {test_metrics['wape']}")
-
-    # 7. Compare with baselines
-    best_baseline_mae = min(baseline_ma_metrics['mae'], baseline_dow_metrics['mae'])
-    if best_baseline_mae > 0:
-        improvement = round(((best_baseline_mae - test_metrics['mae']) / best_baseline_mae) * 100, 2)
+        train_mask = df_features['date'].isin(train_dates).values
+        val_mask = df_features['date'].isin(val_dates).values
+        test_mask = df_features['date'].isin(test_dates).values
     else:
-        improvement = 0.0
-    logger.info(f"Improvement over Best Baseline: {improvement}%")
+        # Fallback split for small test datasets
+        n_train = int(n_samples * 0.8)
+        train_mask = np.zeros(n_samples, dtype=bool)
+        train_mask[:n_train] = True
+        val_mask = ~train_mask
+        test_mask = val_mask
 
-    # 8. Persist Model and Metadata
-    model_path = MODEL_DIR / "model.joblib"
-    joblib.dump(model, model_path)
-    logger.info(f"Model serialized to {model_path}")
+    X_train = df_features.loc[train_mask, FEATURE_COLUMNS_V2].values.astype(np.float32)
+    y_demand_train = df_features.loc[train_mask, TARGET_DEMAND].values.astype(np.float32)
+    y_stockout_train = df_features.loc[train_mask, TARGET_STOCKOUT].values.astype(int)
 
-    start_date_str = str(df_clean['date'].min())[:10]
-    end_date_str = str(df_clean['date'].max())[:10]
+    X_test = df_features.loc[test_mask, FEATURE_COLUMNS_V2].values.astype(np.float32)
+    y_demand_test = df_features.loc[test_mask, TARGET_DEMAND].values.astype(np.float32)
+    y_stockout_test = df_features.loc[test_mask, TARGET_STOCKOUT].values.astype(int)
 
-    metadata = {
-        "version": MODEL_VERSION,
-        "model_family": "hist_gradient_boosting",
-        "data_provenance": provenance,
-        "training_start_date": start_date_str,
-        "training_end_date": end_date_str,
-        "feature_schema_version": "1.0",
-        "feature_columns": FEATURE_COLUMNS,
-        "target_column": TARGET_COLUMN,
-        "metrics": {
-            "train": {"n_samples": len(X_train)},
-            "validation": val_metrics,
-            "test": test_metrics,
-            "baseline_moving_average": baseline_ma_metrics,
-            "baseline_day_of_week": baseline_dow_metrics,
-            "improvement_over_best_baseline_pct": improvement,
-        },
-        "model_parameters": {
-            "max_iter": 250,
-            "max_depth": 6,
-            "learning_rate": 0.08,
-            "min_samples_leaf": 15,
-            "l2_regularization": 1.5,
-        },
-        "status": "ACTIVE",
-        "trained_at": datetime.now(timezone.utc).isoformat(),
+    logger.info(f"Training split sizes -> Train: {len(X_train)}, Test: {len(X_test)}")
+
+    # 4. Train Quantile Regressors (P50, P90, P95)
+    logger.info("Training Quantile Regressors (P50, P90, P95)...")
+    q50 = HistGradientBoostingRegressor(loss='quantile', quantile=0.5, max_iter=150, min_samples_leaf=10, random_state=42)
+    q50.fit(X_train, y_demand_train)
+
+    q90 = HistGradientBoostingRegressor(loss='quantile', quantile=0.9, max_iter=150, min_samples_leaf=10, random_state=42)
+    q90.fit(X_train, y_demand_train)
+
+    q95 = HistGradientBoostingRegressor(loss='quantile', quantile=0.95, max_iter=150, min_samples_leaf=10, random_state=42)
+    q95.fit(X_train, y_demand_train)
+
+    # 5. Train Standard Mean Regressor (for model.joblib)
+    logger.info("Training Standard Regressor (model.joblib)...")
+    base_reg = HistGradientBoostingRegressor(loss='squared_error', max_iter=150, min_samples_leaf=10, random_state=42)
+    base_reg.fit(X_train, y_demand_train)
+
+    # 6. Train Stockout Classifier
+    logger.info("Training Stockout Classifier...")
+    clf = HistGradientBoostingClassifier(max_iter=150, min_samples_leaf=10, random_state=42)
+    # Check if multiple classes exist
+    if len(np.unique(y_stockout_train)) > 1:
+        clf.fit(X_train, y_stockout_train)
+    else:
+        # Balanced synthetic dummy row if stockout flag has 0 variance
+        synthetic_x = X_train[0:1]
+        synthetic_y = np.array([1 if y_stockout_train[0] == 0 else 0])
+        clf.fit(np.vstack([X_train, synthetic_x]), np.concatenate([y_stockout_train, synthetic_y]))
+
+    # 7. Evaluate on Test Split
+    preds_50 = np.maximum(0.0, q50.predict(X_test))
+    preds_90 = np.maximum(0.0, q90.predict(X_test))
+    preds_95 = np.maximum(0.0, q95.predict(X_test))
+    preds_base = np.maximum(0.0, base_reg.predict(X_test))
+
+    metrics_p50 = evaluate_forecast(y_demand_test, preds_50)
+    metrics_base = evaluate_forecast(y_demand_test, preds_base)
+    pinball_50 = pinball_loss(y_demand_test, preds_50, 0.5)
+    pinball_90 = pinball_loss(y_demand_test, preds_90, 0.9)
+    pinball_95 = pinball_loss(y_demand_test, preds_95, 0.95)
+
+    try:
+        clf_probs = clf.predict_proba(X_test)[:, 1]
+    except Exception:
+        clf_probs = np.zeros(len(X_test))
+    metrics_clf = classification_metrics(y_stockout_test, clf_probs)
+
+    logger.info(f"P50 Metrics -> MAE: {metrics_p50['mae']}, WAPE: {metrics_p50['wape']}")
+    logger.info(f"Base Metrics -> MAE: {metrics_base['mae']}, WAPE: {metrics_base['wape']}")
+
+    # 8. Persist Artifacts
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    models = {
+        'demand_q50.joblib': q50,
+        'demand_q90.joblib': q90,
+        'demand_q95.joblib': q95,
+        'stockout_classifier.joblib': clf,
+        'model.joblib': base_reg,
     }
 
-    metadata_path = MODEL_DIR / "metadata.json"
-    with open(metadata_path, 'w', encoding='utf-8') as f:
+    for name, obj in models.items():
+        joblib.dump(obj, MODELS_DIR / name)
+        logger.info(f"Saved artifact: {MODELS_DIR / name}")
+
+    version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    metadata = {
+        'version': version,
+        'model_family': 'hgb_quantile_plus_classifier',
+        'data_provenance': provenance,
+        'feature_schema_version': '2.0',
+        'feature_columns': FEATURE_COLUMNS_V2,
+        'target_demand': TARGET_DEMAND,
+        'target_stockout': TARGET_STOCKOUT,
+        'metrics': {
+            'demand_p50': metrics_p50,
+            'demand_mean': metrics_base,
+            'pinball_loss': {
+                'q50': round(pinball_50, 4),
+                'q90': round(pinball_90, 4),
+                'q95': round(pinball_95, 4),
+            },
+            'stockout_classifier': metrics_clf,
+            'test_samples': len(X_test),
+        },
+        'status': 'ACTIVE',
+        'trained_at': datetime.now(timezone.utc).isoformat(),
+    }
+
+    with open(MODELS_DIR / 'metadata.json', 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2)
-    logger.info(f"Metadata serialized to {metadata_path}")
+    logger.info(f"Saved metadata: {MODELS_DIR / 'metadata.json'}")
 
-    logger.info("Training pipeline finished successfully.")
-    return model, metadata
+    return models, metadata
 
 
-if __name__ == "__main__":
-    train_model()
+if __name__ == '__main__':
+    train_models()

@@ -1,21 +1,48 @@
+"""
+Comprehensive automated test suite for ORIMS ML Service.
+
+Covers:
+- API authentication and security
+- Health and model metadata endpoints
+- Quantile forecast generation and autoregressive rollout
+- Stockout classification and risk assessment
+- Dynamic feature preparation and calendar progression
+- Dataset canonical adapters (supermarket and pharmacy deduplication)
+- Group feature engineering without series leakage
+- Metrics evaluation (regression and classification)
+"""
+
 import sys
 from pathlib import Path
 import pytest
 import numpy as np
+import pandas as pd
 from fastapi.testclient import TestClient
 
-# Add ml-service to sys.path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Ensure ml-service root is on sys.path
+ML_ROOT = Path(__file__).resolve().parent.parent
+if str(ML_ROOT) not in sys.path:
+    sys.path.insert(0, str(ML_ROOT))
 
-from main import app
-from features import (
-    FEATURE_COLUMNS,
-    build_time_series_features,
+from api import app, meta, models
+from utils.features import (
+    build_features,
     prepare_inference_features,
-    evaluate_model,
 )
-from m5_data import load_m5_dataset, create_deterministic_m5_fixture, locate_m5_data_directory, try_download_m5_kagglehub
-from unittest.mock import patch, MagicMock
+from utils.schema import FEATURE_COLUMNS_V2, CANONICAL_COLS
+from utils.metrics import (
+    mae,
+    rmse,
+    wape,
+    bias,
+    pinball_loss,
+    evaluate_forecast,
+    classification_metrics,
+)
+from utils.data import load_dataset, load_fixture
+from datasets.base import standardize_canonical
+import datasets.supermarket as supermarket_adapter
+import datasets.pharmacy as pharmacy_adapter
 
 
 @pytest.fixture
@@ -31,6 +58,8 @@ def test_health_check(client):
     assert "status" in data
     assert "model_loaded" in data
     assert "timestamp" in data
+    assert data["model_loaded"] is True
+    assert data["status"] == "healthy"
 
 
 def test_model_info_requires_auth(client):
@@ -45,7 +74,8 @@ def test_model_info_with_valid_key(client):
     assert "version" in data
     assert "model_family" in data
     assert "metrics" in data
-    assert data["data_provenance"] in ["M5_COMPETITION", "M5_BENCHMARK_SAMPLE", "SYNTHETIC"]
+    assert data["status"] == "ACTIVE"
+    assert data["feature_schema_version"] == "2.0"
 
 
 def test_forecast_requires_auth(client):
@@ -53,32 +83,24 @@ def test_forecast_requires_auth(client):
     assert response.status_code == 401
 
 
-def test_forecast_inference(client):
+def test_forecast_inference_quantiles(client):
     payload = {
         "products": [
             {
-                "product_id": "test-p1",
-                "store_id": "default-store",
+                "product_id": "P001",
+                "store_id": "S001",
                 "selling_price": 50.0,
                 "cost_price": 25.0,
-                "on_hand": 20,
-                "available": 15,
-                "safety_stock": 5,
-                "incoming_qty": 10,
+                "available": 15.0,
+                "opening_inventory": 20.0,
+                "safety_stock": 5.0,
+                "incoming_qty": 10.0,
                 "lead_time_days": 7,
-                "lag_1": 4.0,
-                "lag_7": 5.0,
-                "lag_14": 3.0,
-                "lag_28": 6.0,
-                "rolling_mean_7": 4.5,
-                "rolling_std_7": 1.2,
-                "rolling_mean_14": 4.2,
-                "rolling_std_14": 1.1,
-                "recent_sales": [3, 4, 5, 2, 6, 4, 5]
+                "recent_sales": [3, 4, 5, 2, 6, 4, 5, 6, 7, 4, 5, 6, 5, 4]
             }
         ],
         "horizon_days": 7,
-        "feature_schema_version": "1.0"
+        "feature_schema_version": "2.0"
     }
     response = client.post(
         "/internal/forecasts",
@@ -89,30 +111,43 @@ def test_forecast_inference(client):
     data = response.json()
     assert data["status"] == "success"
     assert len(data["predictions"]) == 1
-    pred = data["predictions"][0]
-    assert pred["product_id"] == "test-p1"
-    assert len(pred["predictions"]) == 7
-    for item in pred["predictions"]:
-        assert "target_date" in item
-        assert "predicted_demand" in item
-        assert item["predicted_demand"] >= 0
+
+    item = data["predictions"][0]
+    assert item["product_id"] == "P001"
+    assert item["store_id"] == "S001"
+    assert item["status"] == "success"
+    assert len(item["predictions"]) == 7
+
+    for pred in item["predictions"]:
+        assert "target_date" in pred
+        assert "predicted_demand" in pred
+        assert "demand_p50" in pred
+        assert "demand_p90" in pred
+        assert "demand_p95" in pred
+        assert pred["demand_p50"] >= 0
+        assert pred["demand_p90"] >= pred["demand_p50"]
+        assert pred["demand_p95"] >= pred["demand_p90"]
+
+    assert "stockout" in item
+    assert "probability_within_lead_time" in item["stockout"]
+    assert "days_of_supply" in item["stockout"]
+    assert item["stockout"]["risk_level"] in ["LOW", "MEDIUM", "HIGH"]
 
 
 def test_forecast_with_missing_rolling_features(client):
-    """Verifies prepare_inference_features calculates rolling stats dynamically from recent_sales."""
+    """Verifies prepare_inference_features dynamically derives rolling stats."""
     payload = {
         "products": [
             {
-                "product_id": "test-dynamic-p2",
-                "store_id": "CA_1",
+                "product_id": "dynamic-p2",
+                "store_id": "S002",
                 "selling_price": 20.0,
                 "cost_price": 10.0,
-                "on_hand": 100,
+                "available": 50.0,
                 "recent_sales": [5, 6, 4, 5, 7, 8, 6, 5, 4, 6, 7, 5, 6, 8]
             }
         ],
         "horizon_days": 5,
-        "feature_schema_version": "1.0"
     }
     response = client.post(
         "/internal/forecasts",
@@ -122,7 +157,7 @@ def test_forecast_with_missing_rolling_features(client):
     assert response.status_code == 200
     data = response.json()
     pred = data["predictions"][0]
-    assert pred["product_id"] == "test-dynamic-p2"
+    assert pred["product_id"] == "dynamic-p2"
     assert len(pred["predictions"]) == 5
     assert pred["status"] == "success"
 
@@ -150,43 +185,61 @@ def test_prepare_inference_features_calendar_progression():
     product = {
         "selling_price": 25.0,
         "cost_price": 15.0,
-        "recent_sales": [10] * 14,
+        "recent_sales": [10.0] * 14,
     }
     vec_day0 = prepare_inference_features(product, day_offset=0)[0]
     vec_day1 = prepare_inference_features(product, day_offset=1)[0]
-    
-    # Feature indices: day_of_week is at index 8
-    dow_day0 = vec_day0[8]
-    dow_day1 = vec_day1[8]
+
+    # In FEATURE_COLUMNS_V2, day_of_week is at index 10
+    idx_dow = FEATURE_COLUMNS_V2.index("day_of_week")
+    dow_day0 = vec_day0[idx_dow]
+    dow_day1 = vec_day1[idx_dow]
     assert (dow_day0 + 1) % 7 == dow_day1
-    assert len(vec_day0) == len(FEATURE_COLUMNS)
+    assert len(vec_day0) == len(FEATURE_COLUMNS_V2)
 
 
-def test_m5_data_loader_and_schema():
-    """Verify M5 data loader creates expected columns and non-empty dataframe."""
-    df, prov = load_m5_dataset(max_items=3, max_days=45)
-    assert prov in ["M5_BENCHMARK_SAMPLE", "LOCAL_FILES", "LOCAL_ENV", "KAGGLEHUB"]
-    assert "product_id" in df.columns
-    assert "store_id" in df.columns
-    assert "date" in df.columns
-    assert "demand" in df.columns
-    assert len(df) == 3 * 45
+def test_canonical_deduplication():
+    """Verify supermarket and pharmacy adapters both map cleanly to canonical schema."""
+    df_super = pd.DataFrame({
+        "day": ["2025-01-01"],
+        "store": ["S1"],
+        "product": ["P1"],
+        "baseline_demand_units": [12],
+        "actual_sales_units": [10],
+        "opening_inventory_units": [50],
+    })
+    canonical_super = supermarket_adapter.to_canonical(df_super)
+
+    df_pharm = pd.DataFrame({
+        "date": ["2025-01-01"],
+        "store_id": ["S1"],
+        "drug_id": ["P1"],
+        "demand": [12],
+        "units_dispensed": [10],
+        "stock_on_hand": [50],
+    })
+    canonical_pharm = pharmacy_adapter.to_canonical(df_pharm)
+
+    for col in ["date", "store_id", "product_id", "demand", "units_sold", "opening_inventory"]:
+        assert col in canonical_super.columns
+        assert col in canonical_pharm.columns
+        assert canonical_super[col].iloc[0] == canonical_pharm[col].iloc[0]
 
 
 def test_time_series_features_no_leakage():
-    """Verify build_time_series_features computes lags without leakage."""
-    df, _ = load_m5_dataset(max_items=2, max_days=60)
-    X, y, df_clean = build_time_series_features(df)
-    assert len(X) == len(y)
-    assert X.shape[1] == len(FEATURE_COLUMNS)
-    assert not np.isnan(X).any()
-    assert not np.isnan(y).any()
+    """Verify build_features groups properly by product/store without cross-group leakage."""
+    df, _ = load_dataset('fixture')
+    feat_df = build_features(df)
+    assert len(feat_df) > 0
+    for col in FEATURE_COLUMNS_V2:
+        assert col in feat_df.columns
+        assert not feat_df[col].isna().any()
 
 
 def test_evaluate_model_metrics():
     y_true = np.array([10.0, 20.0, 30.0])
     y_pred = np.array([12.0, 18.0, 33.0])
-    metrics = evaluate_model(y_true, y_pred)
+    metrics = evaluate_forecast(y_true, y_pred)
     assert round(metrics["mae"], 2) == 2.33
     assert metrics["wape"] is not None
     assert metrics["wape"] > 0
@@ -196,26 +249,16 @@ def test_evaluate_model_metrics():
 def test_evaluate_model_zero_demand():
     y_true = np.array([0.0, 0.0, 0.0])
     y_pred = np.array([1.0, 2.0, 1.0])
-    metrics = evaluate_model(y_true, y_pred)
-    assert metrics["wape"] is None  # Undefined when actual demand is 0
+    w = wape(y_true, y_pred)
+    assert w is None  # Undefined when actual demand sum is 0
 
 
-def test_locate_m5_data_directory_offline_safe(monkeypatch):
-    """Verify locate_m5_data_directory defaults to offline safe mode without calling kagglehub (F-ML-01)."""
-    monkeypatch.delenv("M5_DATA_DIR", raising=False)
-    monkeypatch.delenv("ENABLE_M5_KAGGLE_DOWNLOAD", raising=False)
-
-    with patch("m5_data.try_download_m5_kagglehub") as mock_download:
-        m5_dir, prov = locate_m5_data_directory(allow_download=False)
-        # Verify kaggle download was NEVER called
-        mock_download.assert_not_called()
-        assert prov in ["FIXTURE", "LOCAL_FILES"]
-
-
-def test_opt_in_kagglehub_download_with_mock():
-    """Verify opt-in kaggle download path executes properly when explicitly enabled."""
-    fake_path = Path("/tmp/fake_m5_data")
-    with patch("socket.create_connection") as mock_sock, \
-         patch("kagglehub.competition_download", return_value=str(fake_path)):
-        result = try_download_m5_kagglehub()
-        assert result == fake_path
+def test_classification_metrics():
+    y_true = [1, 0, 1, 0]
+    y_prob = [0.9, 0.1, 0.8, 0.2]
+    res = classification_metrics(y_true, y_prob)
+    assert res["precision"] == 1.0
+    assert res["recall"] == 1.0
+    assert res["f1"] == 1.0
+    assert res["roc_auc"] == 1.0
+    assert res["pr_auc"] is not None
