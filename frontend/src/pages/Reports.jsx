@@ -20,6 +20,30 @@ export default function Reports() {
     expiryRisk: { daysAhead: 60 },
   });
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const handleExportCsv = async (endpoint, params, defaultFilename) => {
+    try {
+      setExporting(true);
+      const res = await api.get(endpoint, {
+        params: { ...params, format: 'csv' },
+        responseType: 'blob',
+      });
+      const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', defaultFilename);
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('Failed to export CSV: ' + (err.message || 'Unknown error'));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const fetchSalesReport = async () => {
     setLoading(true);
@@ -135,45 +159,55 @@ export default function Reports() {
             <SalesReportTab 
               report={salesReport} 
               loading={loading}
+              exporting={exporting}
               filters={filters.sales}
               setFilters={(f) => setFilters({...filters, sales: f})}
               onFetch={fetchSalesReport}
+              onExport={() => handleExportCsv('/reports/sales', filters.sales, `sales-${filters.sales.startDate}-to-${filters.sales.endDate}.csv`)}
             />
           )}
           {activeTab === 'valuation' && (
             <ValuationReportTab 
               report={valuationReport} 
               loading={loading}
+              exporting={exporting}
               filters={filters.valuation}
               setFilters={(f) => setFilters({...filters, valuation: f})}
               onFetch={fetchValuationReport}
+              onExport={() => handleExportCsv('/reports/inventory-valuation', filters.valuation, `valuation-${filters.valuation.valuationMethod.toLowerCase()}.csv`)}
             />
           )}
           {activeTab === 'turnover' && (
             <TurnoverReportTab 
               report={turnoverReport} 
               loading={loading}
+              exporting={exporting}
               filters={filters.turnover}
               setFilters={(f) => setFilters({...filters, turnover: f})}
               onFetch={fetchTurnoverReport}
+              onExport={() => handleExportCsv('/reports/turnover', filters.turnover, `turnover-${filters.turnover.startDate}-to-${filters.turnover.endDate}.csv`)}
             />
           )}
           {activeTab === 'stock-movements' && (
             <StockMovementsReportTab 
               report={stockMovementsReport}
               loading={loading}
+              exporting={exporting}
               filters={filters.stockMovements}
               setFilters={(f) => setFilters({...filters, stockMovements: f})}
               onFetch={fetchStockMovementsReport}
+              onExport={() => handleExportCsv('/reports/stock-movements', filters.stockMovements, `movements-${filters.stockMovements.startDate}-to-${filters.stockMovements.endDate}.csv`)}
             />
           )}
           {activeTab === 'expiry-risk' && (
             <ExpiryRiskReportTab 
               report={expiryRiskReport}
               loading={loading}
+              exporting={exporting}
               filters={filters.expiryRisk}
               setFilters={(f) => setFilters({...filters, expiryRisk: f})}
               onFetch={fetchExpiryRiskReport}
+              onExport={() => handleExportCsv('/reports/expiry-risk', filters.expiryRisk, `expiry-risk-${filters.expiryRisk.daysAhead}d.csv`)}
             />
           )}
         </div>
@@ -182,7 +216,7 @@ export default function Reports() {
   );
 }
 
-function SalesReportTab({ report, loading, filters, setFilters, onFetch }) {
+function SalesReportTab({ report, loading, exporting, filters, setFilters, onFetch, onExport }) {
   const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
 
   return (
@@ -204,8 +238,9 @@ function SalesReportTab({ report, loading, filters, setFilters, onFetch }) {
             <option value="month">Month</option>
           </select>
         </div>
-        <div className="flex items-end">
-          <button type="submit" className="btn-primary w-full">Generate</button>
+        <div className="flex items-end gap-2">
+          <button type="submit" disabled={loading} className="btn-primary flex-1">Generate</button>
+          <button type="button" onClick={onExport} disabled={exporting || loading} className="btn-secondary">Export CSV</button>
         </div>
       </form>
 
@@ -264,7 +299,7 @@ function SalesReportTab({ report, loading, filters, setFilters, onFetch }) {
   );
 }
 
-function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
+function ValuationReportTab({ report, loading, exporting, filters, setFilters, onFetch, onExport }) {
   const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
 
   return (
@@ -273,12 +308,13 @@ function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
         <div>
           <label className="label">Valuation Method</label>
           <select value={filters.valuationMethod} onChange={(e) => setFilters({...filters, valuationMethod: e.target.value})} className="input">
-            <option value="CURRENT_COST">Current Cost</option>
-            <option value="WEIGHTED_AVERAGE">Weighted Average</option>
+            <option value="CURRENT_COST">Current Cost (Catalog Replacement)</option>
+            <option value="WEIGHTED_AVERAGE">Weighted Average (Acquisition History)</option>
           </select>
         </div>
-        <div className="flex items-end">
-          <button type="submit" className="btn-primary w-full">Generate</button>
+        <div className="flex items-end gap-2 md:col-span-2">
+          <button type="submit" disabled={loading} className="btn-primary flex-1">Generate</button>
+          <button type="button" onClick={onExport} disabled={exporting || loading} className="btn-secondary">Export CSV</button>
         </div>
       </form>
 
@@ -287,16 +323,22 @@ function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
       ) : report && (
         <div className="space-y-6">
           <div className="card p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-2">
               <h3 className="text-lg font-semibold">Inventory Valuation</h3>
-              <span className="text-sm text-gray-500">Method: {report.valuationMethod}</span>
+              <span className="badge badge-blue">Method: {report.valuationMethod}</span>
             </div>
+            {report.valuationBasisDescription && (
+              <p className="text-sm text-gray-500 mb-4">{report.valuationBasisDescription}</p>
+            )}
             <p className="text-3xl font-bold text-blue-600">{formatCurrency(report.totalValue)}</p>
             <p className="text-sm text-gray-500 mt-1">{report.itemCount} products in stock</p>
           </div>
 
           <div className="card p-6">
-            <h3 className="text-lg font-semibold mb-4">Valuation by Product</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Valuation by Product</h3>
+              <button onClick={onExport} disabled={exporting} className="btn-secondary text-sm">Download CSV</button>
+            </div>
             <div className="table-container">
               <table className="table">
                 <thead>
@@ -306,6 +348,7 @@ function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
                     <th>Category</th>
                     <th>On Hand</th>
                     <th>Unit Cost</th>
+                    <th>Cost Basis</th>
                     <th>Total Value</th>
                   </tr>
                 </thead>
@@ -317,6 +360,11 @@ function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
                       <td>{item.category || '-'}</td>
                       <td>{item.onHand}</td>
                       <td>{formatCurrency(item.unitCost)}</td>
+                      <td>
+                        <span className="text-xs font-mono bg-gray-100 text-gray-700 px-2 py-0.5 rounded">
+                          {item.costBasis}
+                        </span>
+                      </td>
                       <td className="font-medium">{formatCurrency(item.totalValue)}</td>
                     </tr>
                   ))}
@@ -330,7 +378,7 @@ function ValuationReportTab({ report, loading, filters, setFilters, onFetch }) {
   );
 }
 
-function TurnoverReportTab({ report, loading, filters, setFilters, onFetch }) {
+function TurnoverReportTab({ report, loading, exporting, filters, setFilters, onFetch, onExport }) {
   const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
 
   return (
@@ -344,8 +392,9 @@ function TurnoverReportTab({ report, loading, filters, setFilters, onFetch }) {
           <label className="label">End Date</label>
           <input type="date" value={filters.endDate} onChange={(e) => setFilters({...filters, endDate: e.target.value})} className="input" />
         </div>
-        <div className="flex items-end">
-          <button type="submit" className="btn-primary w-full">Generate</button>
+        <div className="flex items-end gap-2">
+          <button type="submit" disabled={loading} className="btn-primary flex-1">Generate</button>
+          <button type="button" onClick={onExport} disabled={exporting || loading} className="btn-secondary">Export CSV</button>
         </div>
       </form>
 
@@ -397,7 +446,7 @@ function TurnoverReportTab({ report, loading, filters, setFilters, onFetch }) {
   );
 }
 
-function StockMovementsReportTab({ report, loading, filters, setFilters, onFetch }) {
+function StockMovementsReportTab({ report, loading, exporting, filters, setFilters, onFetch, onExport }) {
   const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
 
   return (
@@ -411,9 +460,12 @@ function StockMovementsReportTab({ report, loading, filters, setFilters, onFetch
           <label className="label">End Date</label>
           <input type="date" value={filters.endDate} onChange={(e) => setFilters({...filters, endDate: e.target.value})} className="input" />
         </div>
-        <div className="flex items-end">
-          <button type="submit" disabled={loading} className="btn-primary w-full">
+        <div className="flex items-end gap-2">
+          <button type="submit" disabled={loading} className="btn-primary flex-1">
             {loading ? 'Loading...' : 'Generate Report'}
+          </button>
+          <button type="button" onClick={onExport} disabled={exporting || loading} className="btn-secondary">
+            Export CSV
           </button>
         </div>
       </form>
@@ -481,7 +533,7 @@ function StockMovementsReportTab({ report, loading, filters, setFilters, onFetch
   );
 }
 
-function ExpiryRiskReportTab({ report, loading, filters, setFilters, onFetch }) {
+function ExpiryRiskReportTab({ report, loading, exporting, filters, setFilters, onFetch, onExport }) {
   const handleSubmit = (e) => { e.preventDefault(); onFetch(); };
 
   return (
@@ -496,9 +548,12 @@ function ExpiryRiskReportTab({ report, loading, filters, setFilters, onFetch }) 
             <option value={90}>Next 90 Days</option>
           </select>
         </div>
-        <div className="flex items-end">
-          <button type="submit" disabled={loading} className="btn-primary w-full">
+        <div className="flex items-end gap-2 md:col-span-2">
+          <button type="submit" disabled={loading} className="btn-primary flex-1">
             {loading ? 'Loading...' : 'Check Expiry Risk'}
+          </button>
+          <button type="button" onClick={onExport} disabled={exporting || loading} className="btn-secondary">
+            Export CSV
           </button>
         </div>
       </form>

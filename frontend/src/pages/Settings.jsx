@@ -21,8 +21,17 @@ export default function Settings() {
   const fetchStore = async () => {
     try {
       const res = await api.get('/settings/store');
-      setStore(res.data.store);
-      setStoreForm({ name: res.data.store.name, location: res.data.store.location || '', taxRate: 0.10, currency: 'USD', timezone: 'UTC' });
+      const st = res.data.store;
+      setStore(st);
+      if (st) {
+        setStoreForm({
+          name: st.name || '',
+          location: st.location || '',
+          taxRate: st.taxRate !== null && st.taxRate !== undefined ? Number(st.taxRate) : 0.10,
+          currency: st.currency || 'USD',
+          timezone: st.timezone || 'UTC',
+        });
+      }
     } catch (err) {
       console.error('Failed to fetch store', err);
     }
@@ -52,8 +61,15 @@ export default function Settings() {
     e.preventDefault();
     setSaving(true);
     try {
-      await api.put('/settings/store', storeForm);
-      fetchStore();
+      const payload = {
+        name: storeForm.name.trim(),
+        location: storeForm.location?.trim() || null,
+        taxRate: !isNaN(storeForm.taxRate) ? Number(storeForm.taxRate) : 0.10,
+        currency: storeForm.currency?.trim()?.toUpperCase() || 'USD',
+        timezone: storeForm.timezone?.trim() || 'UTC',
+      };
+      await api.put('/settings/store', payload);
+      await fetchStore();
       alert('Store settings updated');
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to update store');

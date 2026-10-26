@@ -91,6 +91,10 @@ router.get('/:id', async (req, res) => {
       inventory: { include: { store: { select: { id: true, name: true } } } },
       supplierProducts: { include: { supplier: { select: { id: true, name: true } } } },
       inventoryPolicies: { include: { store: { select: { id: true, name: true } } } },
+      productBatches: {
+        include: { store: { select: { id: true, name: true } } },
+        orderBy: { expiryDate: 'asc' },
+      },
     },
   });
 

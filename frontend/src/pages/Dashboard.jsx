@@ -10,8 +10,12 @@ import {
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
 export default function Dashboard() {
-  const [summary, setSummary] = useState(null);
+  const [todayRevenue, setTodayRevenue] = useState(0);
+  const [activeProductsCount, setActiveProductsCount] = useState(0);
+  const [lowStockTotal, setLowStockTotal] = useState(0);
+  const [expiringTotal, setExpiringTotal] = useState(0);
   const [salesTrend, setSalesTrend] = useState([]);
+  const [topProducts, setTopProducts] = useState([]);
   const [lowStock, setLowStock] = useState([]);
   const [expiringSoon, setExpiringSoon] = useState([]);
   const [recentSales, setRecentSales] = useState([]);
@@ -25,18 +29,26 @@ export default function Dashboard() {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-      const [summaryRes, trendRes, lowStockRes, expiryRes, recentRes] = await Promise.all([
-        api.get('/reports/sales', { params: { startDate: new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0] } }),
-        api.get('/reports/sales', { params: { startDate: new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0], endDate: new Date().toISOString().split('T')[0], groupBy: 'day' } }),
+      const todayStr = new Date().toISOString().split('T')[0];
+      const thirtyDaysAgoStr = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+      const [todaySalesRes, trendRes, activeProductsRes, lowStockRes, expiryRes, recentRes] = await Promise.all([
+        api.get('/reports/sales', { params: { startDate: todayStr, endDate: todayStr } }),
+        api.get('/reports/sales', { params: { startDate: thirtyDaysAgoStr, endDate: todayStr, groupBy: 'day' } }),
+        api.get('/products', { params: { active: true, limit: 1 } }),
         api.get('/inventory', { params: { stockStatus: 'LOW_STOCK', limit: 5 } }),
         api.get('/optimization/expiry-risk', { params: { daysUntilExpiry: 30, limit: 5 } }),
         api.get('/sales', { params: { limit: 5, sort: 'createdAt', order: 'desc' } }),
       ]);
       
-      setSummary(summaryRes.data.totals);
+      setTodayRevenue(todaySalesRes.data.totals?.totalRevenue || 0);
       setSalesTrend(trendRes.data.data || []);
+      setTopProducts(trendRes.data.totals?.topProducts || []);
+      setActiveProductsCount(activeProductsRes.data.pagination?.total ?? 0);
       setLowStock(lowStockRes.data.data || []);
+      setLowStockTotal(lowStockRes.data.pagination?.total ?? (lowStockRes.data.data?.length || 0));
       setExpiringSoon(expiryRes.data.data || []);
+      setExpiringTotal(expiryRes.data.pagination?.total ?? (expiryRes.data.data?.length || 0));
       setRecentSales(recentRes.data.data || []);
     } catch (err) {
       setError(err.message);
@@ -67,30 +79,30 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard 
           title="Today's Sales" 
-          value={formatCurrency(summary?.totalRevenue)} 
-          change="+12.5%"
-          changePositive={true}
+          value={formatCurrency(todayRevenue)} 
+          statusText="Calendar day to date"
+          statusPositive={todayRevenue > 0}
           icon={<SalesIcon />}
         />
         <KPICard 
           title="Active Products" 
-          value={formatNumber(summary?.totalUnits)} 
-          change="+3"
-          changePositive={true}
+          value={formatNumber(activeProductsCount)} 
+          statusText="Active in catalogue"
+          statusPositive={activeProductsCount > 0}
           icon={<ProductsIcon />}
         />
         <KPICard 
           title="Low Stock Items" 
-          value={lowStock.length} 
-          change={lowStock.length > 0 ? 'Attention needed' : 'All stocked'}
-          changePositive={lowStock.length === 0}
+          value={formatNumber(lowStockTotal)} 
+          statusText={lowStockTotal > 0 ? `${lowStockTotal} items need reorder` : 'All items well-stocked'}
+          statusPositive={lowStockTotal === 0}
           icon={<AlertIcon />}
         />
         <KPICard 
           title="Expiring Soon" 
-          value={expiringSoon.length} 
-          change={expiringSoon.length > 0 ? 'Check batches' : 'No expiries'}
-          changePositive={expiringSoon.length === 0}
+          value={formatNumber(expiringTotal)} 
+          statusText={expiringTotal > 0 ? `${expiringTotal} batches near expiry` : 'No upcoming expiries'}
+          statusPositive={expiringTotal === 0}
           icon={<ClockIcon />}
         />
       </div>
@@ -136,16 +148,16 @@ export default function Dashboard() {
         {/* Top Products */}
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Top Selling Products</h2>
-          {summary?.topProducts?.length > 0 ? (
+          {topProducts.length > 0 ? (
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={summary.topProducts.slice(0, 5).reverse()} layout="vertical">
+                <BarChart data={topProducts.slice(0, 5).reverse()} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis type="number" tick={{ fontSize: 12, fill: '#6b7280' }} tickFormatter={(v) => formatNumber(v)} />
                   <YAxis type="category" dataKey="product" tick={{ fontSize: 12, fill: '#6b7280' }} width={100} />
                   <Tooltip formatter={(value) => [formatNumber(value), 'Units']} contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px' }} />
                   <Bar dataKey="units" radius={[0, 4, 4, 0]}>
-                    {summary.topProducts.slice(0, 5).reverse().map((_, i) => (
+                    {topProducts.slice(0, 5).reverse().map((_, i) => (
                       <Cell key={`cell-${i}`} fill={COLORS[i % COLORS.length]} />
                     ))}
                   </Bar>
@@ -259,7 +271,7 @@ export default function Dashboard() {
   );
 }
 
-function KPICard({ title, value, change, changePositive, icon }) {
+function KPICard({ title, value, statusText, statusPositive, delta, deltaPositive, vsText, icon }) {
   return (
     <div className="card p-6">
       <div className="flex items-center justify-between">
@@ -271,12 +283,22 @@ function KPICard({ title, value, change, changePositive, icon }) {
           {icon}
         </div>
       </div>
-      <div className="mt-4 flex items-center">
-        <span className={`text-sm font-medium ${changePositive ? 'text-green-600' : 'text-red-600'}`}>
-          {changePositive ? '▲' : '▼'} {change}
-        </span>
-        <span className="ml-2 text-sm text-gray-500">vs last period</span>
-      </div>
+      {(delta !== undefined || statusText) && (
+        <div className="mt-4 flex items-center">
+          {delta !== undefined ? (
+            <>
+              <span className={`text-sm font-medium ${deltaPositive ? 'text-green-600' : 'text-red-600'}`}>
+                {deltaPositive ? '▲' : '▼'} {delta}
+              </span>
+              {vsText && <span className="ml-2 text-sm text-gray-500">{vsText}</span>}
+            </>
+          ) : (
+            <span className={`text-sm font-medium ${statusPositive ? 'text-green-600' : 'text-amber-600'}`}>
+              {statusText}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

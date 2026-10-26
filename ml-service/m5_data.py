@@ -86,11 +86,21 @@ def create_deterministic_m5_fixture(file_path: Path = SAMPLE_FIXTURE_PATH, n_ite
     return df_wide
 
 
-def try_download_m5_kagglehub() -> Optional[Path]:
+def try_download_m5_kagglehub(timeout_sec: float = 2.0) -> Optional[Path]:
     """
     Attempt downloading the official M5 dataset via kagglehub.
+    Includes bounded network pre-flight check to prevent indefinite socket hangs in offline environments.
     Returns path to downloaded dataset if successful, or None.
     """
+    import socket
+    # Pre-flight check for network connectivity to prevent hanging in offline environments
+    try:
+        sock = socket.create_connection(("www.kaggle.com", 443), timeout=timeout_sec)
+        sock.close()
+    except Exception as e:
+        logger.info(f"Kaggle network pre-flight check skipped (offline or unreachable): {e}")
+        return None
+
     try:
         import kagglehub
         logger.info("Attempting M5 download via kagglehub ('m5-forecasting-accuracy')...")
@@ -102,13 +112,13 @@ def try_download_m5_kagglehub() -> Optional[Path]:
         return None
 
 
-def locate_m5_data_directory() -> Tuple[Optional[Path], str]:
+def locate_m5_data_directory(allow_download: bool = False) -> Tuple[Optional[Path], str]:
     """
     Locates M5 dataset directory in order of precedence:
     1. M5_DATA_DIR environment variable
     2. ml-service/data/m5/
-    3. Kagglehub competition download
-    4. Deterministic local fixture
+    3. Kagglehub competition download (only if allow_download is True or ENABLE_M5_KAGGLE_DOWNLOAD=1)
+    4. Deterministic local fixture (default for offline/CI/tests)
     """
     # 1. Environment variable
     env_dir = os.getenv("M5_DATA_DIR")
@@ -122,22 +132,26 @@ def locate_m5_data_directory() -> Tuple[Optional[Path], str]:
         logger.info(f"Found local M5 dataset directory: {local_m5}")
         return local_m5, "LOCAL_FILES"
 
-    # 3. Attempt kagglehub download
-    kaggle_path = try_download_m5_kagglehub()
-    if kaggle_path and kaggle_path.exists():
-        return kaggle_path, "KAGGLEHUB"
+    # 3. Explicit opt-in Kagglehub download only
+    enable_kaggle_env = os.getenv("ENABLE_M5_KAGGLE_DOWNLOAD", "0").lower() in ("1", "true", "yes")
+    if allow_download or enable_kaggle_env:
+        kaggle_path = try_download_m5_kagglehub()
+        if kaggle_path and kaggle_path.exists():
+            return kaggle_path, "KAGGLEHUB"
+    else:
+        logger.info("Skipping Kagglehub download (allow_download=False, offline safe mode). Using deterministic fixture.")
 
     # 4. Use fixture
     return None, "FIXTURE"
 
 
-def load_m5_dataset(max_items: int = 50, max_days: int = 365) -> Tuple[pd.DataFrame, str]:
+def load_m5_dataset(max_items: int = 50, max_days: int = 365, allow_download: bool = False) -> Tuple[pd.DataFrame, str]:
     """
     Loads and converts M5 competition dataset to standardized long format:
     Columns: product_id, store_id, date, demand, selling_price, cost_price,
              on_hand, available, safety_stock, incoming_qty, lead_time_days
     """
-    m5_dir, provenance = locate_m5_data_directory()
+    m5_dir, provenance = locate_m5_data_directory(allow_download=allow_download)
 
     if m5_dir is not None:
         sales_file = None

@@ -14,7 +14,8 @@ from features import (
     prepare_inference_features,
     evaluate_model,
 )
-from m5_data import load_m5_dataset, create_deterministic_m5_fixture
+from m5_data import load_m5_dataset, create_deterministic_m5_fixture, locate_m5_data_directory, try_download_m5_kagglehub
+from unittest.mock import patch, MagicMock
 
 
 @pytest.fixture
@@ -197,3 +198,24 @@ def test_evaluate_model_zero_demand():
     y_pred = np.array([1.0, 2.0, 1.0])
     metrics = evaluate_model(y_true, y_pred)
     assert metrics["wape"] is None  # Undefined when actual demand is 0
+
+
+def test_locate_m5_data_directory_offline_safe(monkeypatch):
+    """Verify locate_m5_data_directory defaults to offline safe mode without calling kagglehub (F-ML-01)."""
+    monkeypatch.delenv("M5_DATA_DIR", raising=False)
+    monkeypatch.delenv("ENABLE_M5_KAGGLE_DOWNLOAD", raising=False)
+
+    with patch("m5_data.try_download_m5_kagglehub") as mock_download:
+        m5_dir, prov = locate_m5_data_directory(allow_download=False)
+        # Verify kaggle download was NEVER called
+        mock_download.assert_not_called()
+        assert prov in ["FIXTURE", "LOCAL_FILES"]
+
+
+def test_opt_in_kagglehub_download_with_mock():
+    """Verify opt-in kaggle download path executes properly when explicitly enabled."""
+    fake_path = Path("/tmp/fake_m5_data")
+    with patch("socket.create_connection") as mock_sock, \
+         patch("kagglehub.competition_download", return_value=str(fake_path)):
+        result = try_download_m5_kagglehub()
+        assert result == fake_path

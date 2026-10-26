@@ -6,6 +6,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Products from './pages/Products';
 import ProductDetail from './pages/ProductDetail';
+import ProductEdit from './pages/ProductEdit';
 import Inventory from './pages/Inventory';
 import POS from './pages/POS';
 import Sales from './pages/Sales';
@@ -44,7 +45,7 @@ function ProtectedRoute({ children, allowedRoles }) {
   return children;
 }
 
-function AppRoutes() {
+export function AppRoutes() {
   return (
     <Routes>
       {/* Public Landing Page */}
@@ -65,6 +66,14 @@ function AppRoutes() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/products" element={<Products />} />
         <Route path="/products/:id" element={<ProductDetail />} />
+        <Route
+          path="/products/:id/edit"
+          element={
+            <ProtectedRoute allowedRoles={['ADMIN', 'MANAGER']}>
+              <ProductEdit />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/inventory" element={<Inventory />} />
         <Route
           path="/pos"

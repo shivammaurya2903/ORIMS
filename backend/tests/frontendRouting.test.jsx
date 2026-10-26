@@ -6,6 +6,8 @@ import { AuthContext } from '../../frontend/src/context/AuthContext.jsx';
 import Landing from '../../frontend/src/pages/Landing.jsx';
 import NotFound from '../../frontend/src/pages/NotFound.jsx';
 import Login from '../../frontend/src/pages/Login.jsx';
+import ProductEdit from '../../frontend/src/pages/ProductEdit.jsx';
+import { AppRoutes } from '../../frontend/src/App.jsx';
 
 globalThis.React = React;
 
@@ -117,5 +119,16 @@ describe('Public Landing Page & Routing Suite', () => {
     expect(sanitizeRedirect('javascript:alert(1)')).toBe('/dashboard');
     expect(sanitizeRedirect(null)).toBe('/dashboard');
     expect(sanitizeRedirect(undefined)).toBe('/dashboard');
+  });
+
+  it('registers /products/:id/edit route for authenticated managers and admins (F-UI-01)', () => {
+    const html = renderWithAuth(<AppRoutes />, {
+      user: { name: 'Manager User', role: 'MANAGER' },
+      route: '/products/test-prod-123/edit',
+    });
+
+    // Confirms route is registered and does not fall back to 404
+    expect(html).not.toContain('Page Not Found');
+    expect(html).not.toContain('The page you requested could not be found');
   });
 });

@@ -108,9 +108,12 @@ export default function Optimization() {
     }
   };
 
-  const handleApprove = async (id, approvedQty) => {
+  const handleApprove = async (id, approvedQty, createPurchaseOrder = false) => {
     try {
-      await api.post(`/optimization/recommendations/${id}/approve`, { approvedQty, createPurchaseOrder: false });
+      const res = await api.post(`/optimization/recommendations/${id}/approve`, { approvedQty, createPurchaseOrder });
+      if (res.data?.purchaseOrder) {
+        alert(`Recommendation approved! Draft Purchase Order #${res.data.purchaseOrder.id.slice(0, 8)} created.`);
+      }
       fetchRecommendations();
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to approve');
@@ -290,17 +293,50 @@ function RecommendationsTab({ recommendations, loading, pagination, setPaginatio
       {approveModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4">
-            <div className="p-6 border-b border-gray-200"><h2 className="text-xl font-semibold">Approve Recommendation</h2></div>
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-xl font-semibold">Approve Recommendation</h2>
+            </div>
             <div className="p-6 space-y-4">
               <p>Product: <span className="font-medium">{approveModal.product?.name}</span></p>
               <p>Suggested Qty: <span className="font-medium text-blue-600">{approveModal.finalSuggestedQty}</span></p>
               <div>
                 <label className="label">Approved Quantity</label>
-                <input type="number" min="0" defaultValue={approveModal.finalSuggestedQty} ref={(el) => approveModal.approvedQtyInput = el} className="input" />
+                <input
+                  type="number"
+                  min="0"
+                  defaultValue={approveModal.finalSuggestedQty}
+                  ref={(el) => (approveModal.approvedQtyInput = el)}
+                  className="input"
+                />
               </div>
-              <div className="flex gap-3">
-                <button onClick={() => setApproveModal(null)} className="btn-secondary flex-1">Cancel</button>
-                <button onClick={() => { onApprove(approveModal.id, approveModal.approvedQtyInput?.valueAsNumber || approveModal.finalSuggestedQty); setApproveModal(null); }} className="btn-primary flex-1">Approve</button>
+              <div className="flex items-start gap-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <input
+                  type="checkbox"
+                  id="createPO"
+                  defaultChecked={false}
+                  ref={(el) => (approveModal.createPOCheckbox = el)}
+                  className="mt-1 h-4 w-4 text-blue-600 rounded border-gray-300"
+                />
+                <label htmlFor="createPO" className="text-sm text-gray-700">
+                  <span className="font-medium text-gray-900 block">Create Draft Purchase Order</span>
+                  Generate an auditable draft PO for the linked active supplier. Does not submit or place the order.
+                </label>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setApproveModal(null)} className="btn-secondary flex-1">
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const approvedQty = approveModal.approvedQtyInput?.valueAsNumber ?? approveModal.finalSuggestedQty;
+                    const createPurchaseOrder = approveModal.createPOCheckbox?.checked ?? false;
+                    onApprove(approveModal.id, approvedQty, createPurchaseOrder);
+                    setApproveModal(null);
+                  }}
+                  className="btn-primary flex-1"
+                >
+                  Approve
+                </button>
               </div>
             </div>
           </div>

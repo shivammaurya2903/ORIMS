@@ -10,10 +10,19 @@ export default function ProductDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('details');
+  const [movements, setMovements] = useState([]);
+  const [movementsLoading, setMovementsLoading] = useState(false);
+  const [movementsError, setMovementsError] = useState(null);
 
   useEffect(() => {
     fetchProduct();
   }, [id]);
+
+  useEffect(() => {
+    if (activeTab === 'movements') {
+      fetchMovements();
+    }
+  }, [id, activeTab]);
 
   const fetchProduct = async () => {
     try {
@@ -24,6 +33,19 @@ export default function ProductDetail() {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchMovements = async () => {
+    try {
+      setMovementsLoading(true);
+      setMovementsError(null);
+      const res = await api.get(`/inventory/${id}/movements`, { params: { limit: 50 } });
+      setMovements(res.data.data || []);
+    } catch (err) {
+      setMovementsError(err.response?.data?.error || err.message || 'Failed to load movements');
+    } finally {
+      setMovementsLoading(false);
     }
   };
 
@@ -193,7 +215,62 @@ export default function ProductDetail() {
           )}
 
           {activeTab === 'movements' && (
-            <p className="text-gray-500 text-center py-8">Stock movements - to be implemented</p>
+            <div>
+              {movementsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-4 border-blue-600 border-t-transparent"></div>
+                </div>
+              ) : movementsError ? (
+                <div className="text-center py-8">
+                  <p className="text-red-600 mb-2">{movementsError}</p>
+                  <button onClick={fetchMovements} className="btn-secondary text-sm">
+                    Retry
+                  </button>
+                </div>
+              ) : movements.length > 0 ? (
+                <div className="table-container">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Date & Time</th>
+                        <th>Movement Type</th>
+                        <th>Quantity Delta</th>
+                        <th>Reason</th>
+                        <th>Reference</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {movements.map((m) => {
+                        const isPositive = m.quantityDelta > 0;
+                        return (
+                          <tr key={m.id}>
+                            <td className="text-sm text-gray-600">
+                              {new Date(m.createdAt).toLocaleString()}
+                            </td>
+                            <td>
+                              <span className="badge badge-gray font-mono text-xs">
+                                {m.movementType}
+                              </span>
+                            </td>
+                            <td className={`font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                              {isPositive ? `+${m.quantityDelta}` : m.quantityDelta}
+                            </td>
+                            <td className="text-sm text-gray-700">
+                              {m.reason || '—'}
+                            </td>
+                            <td className="text-xs text-gray-500 font-mono">
+                              {m.referenceType ? `${m.referenceType}: ${m.referenceId || ''}` : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-gray-500 text-center py-8">No stock movements recorded</p>
+              )}
+            </div>
           )}
         </div>
       </div>
