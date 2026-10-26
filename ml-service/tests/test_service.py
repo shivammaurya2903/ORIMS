@@ -25,6 +25,7 @@ if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
 
 from api import app, meta, models
+from utils.config import validate_ml_api_key, KNOWN_DEV_KEYS
 from utils.features import (
     build_features,
     prepare_inference_features,
@@ -262,3 +263,50 @@ def test_classification_metrics():
     assert res["f1"] == 1.0
     assert res["roc_auc"] == 1.0
     assert res["pr_auc"] is not None
+
+
+def test_validate_ml_api_key_production_fails_when_missing():
+    with pytest.raises(RuntimeError, match="ML_SERVICE_API_KEY is required"):
+        validate_ml_api_key("production", None)
+    with pytest.raises(RuntimeError, match="ML_SERVICE_API_KEY is required"):
+        validate_ml_api_key("staging", "")
+
+
+def test_validate_ml_api_key_production_fails_on_dev_default():
+    for dev_key in KNOWN_DEV_KEYS:
+        with pytest.raises(RuntimeError, match="cannot use known development default"):
+            validate_ml_api_key("production", dev_key)
+
+
+def test_validate_ml_api_key_production_fails_too_short():
+    with pytest.raises(RuntimeError, match="must be at least 16 characters"):
+        validate_ml_api_key("production", "short-secret-1")
+
+
+def test_validate_ml_api_key_production_succeeds_strong_key():
+    valid_key = "prod-super-secure-ml-key-2026-xyz123"
+    result = validate_ml_api_key("production", valid_key)
+    assert result == valid_key
+
+
+def test_validate_ml_api_key_development_allows_default():
+    assert validate_ml_api_key("development", None) == "dev-ml-api-key"
+    assert validate_ml_api_key("test", None) == "dev-ml-api-key"
+
+
+def test_api_endpoints_do_not_leak_secrets(client):
+    """Ensure health and model-info endpoints do not leak API keys or secrets in their JSON payload."""
+    health_res = client.get("/health")
+    assert health_res.status_code == 200
+    health_text = health_res.text.lower()
+    assert "api_key" not in health_text
+    assert "dev-ml-api-key" not in health_text
+    assert "secret" not in health_text
+
+    model_res = client.get("/internal/model-info", headers={"X-API-Key": "dev-ml-api-key"})
+    assert model_res.status_code == 200
+    model_data = model_res.json()
+    assert "api_key" not in model_data
+    assert "dev-ml-api-key" not in str(model_data)
+    assert "secret" not in model_data
+

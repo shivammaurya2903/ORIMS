@@ -51,7 +51,12 @@ export default function Optimization() {
   const handleRecalculate = async () => {
     try {
       setRecalculating(true);
-      await api.post('/optimization/recalculate');
+      const res = await api.post('/optimization/recalculate');
+      if (res.data?.runStatus === 'PARTIAL_SUCCESS') {
+        alert('Recalculation completed with partial ML coverage: ' + (res.data?.modelForecastsCount || 0) + ' model, ' + (res.data?.fallbackForecastsCount || 0) + ' fallback.');
+      } else if (res.data?.runStatus === 'FALLBACK_ONLY') {
+        alert('ML service unavailable: recalculation completed using baseline moving averages.');
+      }
       await Promise.all([
         fetchRecommendations(),
         fetchForecasts(),
@@ -455,9 +460,9 @@ function ForecastsTab({ forecasts, modelInfo }) {
   }));
 
   const activeModel = modelInfo?.version || forecasts[0]?.modelVersion || 'None';
-  const activeMethod = forecasts[0]?.forecastMethod || (modelInfo?.status === 'ACTIVE' ? 'MODEL' : 'BASELINE_MOVING_AVERAGE');
+  const activeMethod = forecasts[0]?.forecastMethod || (modelInfo?.status === 'ACTIVE' ? 'MODEL_QUANTILE' : 'BASELINE_MOVING_AVERAGE');
   const provenance = modelInfo?.data_provenance || 'M5 Benchmark';
-  const testMae = modelInfo?.metrics?.test?.mae;
+  const testMae = modelInfo?.metrics?.demand_p50?.mae ?? modelInfo?.metrics?.test?.mae;
   const improvement = modelInfo?.metrics?.improvement_over_best_baseline_pct;
 
   return (
@@ -511,16 +516,17 @@ function ForecastsTab({ forecasts, modelInfo }) {
             <tr>
               <th>Target Date</th>
               <th>Product</th>
-              <th>Predicted Demand</th>
+              <th>Predicted Demand (P50)</th>
+              <th>Uncertainty Range (P90 / P95)</th>
+              <th>Stockout Risk</th>
               <th>Method</th>
               <th>Model Version</th>
-              <th>Run ID</th>
             </tr>
           </thead>
           <tbody>
             {forecasts.length === 0 ? (
               <tr>
-                <td colSpan={6} className="p-8 text-center text-gray-500">
+                <td colSpan={7} className="p-8 text-center text-gray-500">
                   No forecasts found. Click &quot;Recalculate Recommendations&quot; to generate demand predictions.
                 </td>
               </tr>
@@ -533,14 +539,34 @@ function ForecastsTab({ forecasts, modelInfo }) {
                     <br />
                     <span className="text-xs text-gray-500 font-mono">{f.product?.sku}</span>
                   </td>
-                  <td className="font-bold text-blue-600">{f.predictedDemand} units</td>
+                  <td className="font-bold text-blue-600">
+                    {f.predictedDemandP50 !== null && f.predictedDemandP50 !== undefined ? f.predictedDemandP50 : f.predictedDemand} units
+                  </td>
+                  <td className="text-sm">
+                    {f.predictedDemandP90 !== null && f.predictedDemandP90 !== undefined ? (
+                      <span className="font-mono text-xs text-gray-700 bg-gray-50 px-2 py-1 rounded border border-gray-200">
+                        P90: {f.predictedDemandP90} | P95: {f.predictedDemandP95}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400 text-xs">—</span>
+                    )}
+                  </td>
                   <td>
-                    <span className={`badge ${f.forecastMethod === 'MODEL' ? 'badge-blue' : 'badge-yellow'}`}>
+                    {f.stockoutRiskLevel ? (
+                      <span className={`badge ${getRiskBadge(f.stockoutRiskLevel)}`}>
+                        {f.stockoutRiskLevel}
+                        {f.stockoutProbability !== null && ` (${Math.round(f.stockoutProbability * 100)}%)`}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400 text-xs">—</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`badge ${f.forecastMethod === 'MODEL' || f.forecastMethod === 'MODEL_QUANTILE' ? 'badge-blue' : 'badge-yellow'}`}>
                       {f.forecastMethod}
                     </span>
                   </td>
-                  <td className="font-mono text-xs">{f.modelVersion}</td>
-                  <td className="font-mono text-xs text-gray-500">{f.runId}</td>
+                  <td className="font-mono text-xs text-gray-500">{f.modelVersion}</td>
                 </tr>
               ))
             )}

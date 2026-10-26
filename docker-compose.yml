@@ -69,6 +69,7 @@ services:
     environment:
       PYTHON_ENV: development
       PORT: 8000
+      ML_SERVICE_API_KEY: dev-ml-api-key
       ML_API_KEY: dev-ml-api-key
       MODEL_PATH: /app/models
     ports:

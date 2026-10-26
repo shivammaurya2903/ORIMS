@@ -12,6 +12,10 @@ import {
 import { validate } from '../utils/validation.js';
 import { requireRole } from '../middleware/auth.js';
 import { NotFoundError, ValidationError } from '../middleware/errorHandler.js';
+import { getMlConfig } from '../config/mlConfig.js';
+import { determineRiskLevel } from '../utils/risk.js';
+
+export { determineRiskLevel };
 
 const router = Router();
 
@@ -20,6 +24,7 @@ router.get('/recommendations', requireRole('ADMIN', 'MANAGER'), validate(recomme
   const page = parseInt(req.query.page) || 1;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const storeId = req.query.storeId;
+  const productId = req.query.productId;
   const categoryId = req.query.categoryId;
   const status = req.query.status;
   const riskLevel = req.query.riskLevel;
@@ -29,20 +34,28 @@ router.get('/recommendations', requireRole('ADMIN', 'MANAGER'), validate(recomme
 
   const where = {};
   if (storeId) where.storeId = storeId;
+  if (productId) where.productId = productId;
   if (status) where.status = status;
   if (categoryId) {
     where.product = { categoryId };
   }
+  // Database-level filtering before pagination
+  if (riskLevel) {
+    where.riskLevel = riskLevel;
+  }
 
   const allowedSortFields = ['calculatedAt', 'createdAt', 'rawSuggestedQty', 'finalSuggestedQty', 'targetStock', 'onHandQty'];
-  let orderBy;
+  let primarySort;
   if (sort === 'urgency') {
-    orderBy = { finalSuggestedQty: order };
+    primarySort = { finalSuggestedQty: order };
   } else if (allowedSortFields.includes(sort)) {
-    orderBy = { [sort]: order };
+    primarySort = { [sort]: order };
   } else {
-    orderBy = { calculatedAt: order };
+    primarySort = { calculatedAt: order };
   }
+
+  // Deterministic tie-breaker
+  const orderBy = [primarySort, { id: 'asc' }];
 
   const [recommendations, totalCount] = await Promise.all([
     prisma.optimizationRecommendation.findMany({
@@ -60,23 +73,17 @@ router.get('/recommendations', requireRole('ADMIN', 'MANAGER'), validate(recomme
     prisma.optimizationRecommendation.count({ where }),
   ]);
 
-  // Add risk level
+  // Backfill riskLevel if legacy records have null in DB
   const data = recommendations.map(r => {
+    if (r.riskLevel) return r;
     const inventoryPosition = r.onHandQty + r.incomingQty - r.committedQty;
     const deficit = r.targetStock - inventoryPosition;
-    let risk = 'LOW';
-    if (deficit > r.safetyStock * 2) risk = 'HIGH';
-    else if (deficit > r.safetyStock) risk = 'MEDIUM';
-    return { ...r, riskLevel: risk };
+    const computedRisk = determineRiskLevel(r.stockoutProbability, r.daysOfSupply, deficit, r.safetyStock);
+    return { ...r, riskLevel: computedRisk };
   });
 
-  let filtered = data;
-  if (riskLevel) {
-    filtered = data.filter(d => d.riskLevel === riskLevel);
-  }
-
   res.json({
-    data: filtered,
+    data,
     pagination: { page, limit, total: totalCount, totalPages: Math.ceil(totalCount / limit) },
   });
 });
@@ -123,6 +130,7 @@ router.post('/recommendations/:id/approve', requireRole('ADMIN', 'MANAGER'), val
               ],
             },
           },
+          include: { items: true },
         });
         newStatus = 'CONVERTED_TO_PO';
       }
@@ -136,16 +144,19 @@ router.post('/recommendations/:id/approve', requireRole('ADMIN', 'MANAGER'), val
         reviewedBy: actorId,
         reviewedAt: new Date(),
       },
-      include: { product: true, store: true },
+      include: {
+        product: { select: { id: true, name: true, sku: true } },
+        store: { select: { id: true, name: true } },
+      },
     });
 
     await tx.auditLog.create({
       data: {
         actorId,
-        action: 'APPROVE_RECOMMENDATION',
+        action: 'UPDATE',
         entityType: 'OptimizationRecommendation',
         entityId: id,
-        details: { approvedQty: finalQty, createPurchaseOrder, purchaseOrderId: createdPo?.id },
+        details: { approvedQty: finalQty, createPurchaseOrder, poId: createdPo?.id },
       },
     });
 
@@ -175,12 +186,16 @@ router.post('/recommendations/:id/reject', requireRole('ADMIN', 'MANAGER'), vali
       reviewedAt: new Date(),
       reviewReason: reason,
     },
+    include: {
+      product: { select: { id: true, name: true, sku: true } },
+      store: { select: { id: true, name: true } },
+    },
   });
 
   await prisma.auditLog.create({
     data: {
       actorId,
-      action: 'REJECT_RECOMMENDATION',
+      action: 'UPDATE',
       entityType: 'OptimizationRecommendation',
       entityId: id,
       details: { reason },
@@ -210,7 +225,7 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
   });
 
   if (products.length === 0) {
-    return res.json({ message: 'No products to recalculate', count: 0 });
+    return res.json({ message: 'No products to recalculate', count: 0, productsProcessed: 0 });
   }
 
   // 2. Fetch incoming order quantities
@@ -272,7 +287,7 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     salesMap[p.id] = dateBuckets.map(dayStr => dailyMap[dayStr] || 0);
   }
 
-  // 4. Prepare feature payload for ML service
+  // 4. Prepare feature payloads
   const mlProducts = products.map(p => {
     const inv = p.inventory[0];
     const policy = p.inventoryPolicies[0];
@@ -316,67 +331,134 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     };
   });
 
-  // 5. Call ML service with timeout and fallback
-  const mlUrl = process.env.ML_SERVICE_URL || 'http://localhost:8000';
-  const mlApiKey = process.env.ML_SERVICE_API_KEY || 'dev-ml-api-key';
-  let forecastData = null;
+  // 5. Bounded chunked batches with retry & validation
+  const mlConfig = getMlConfig();
+  const mlUrl = mlConfig.url;
+  const mlApiKey = mlConfig.apiKey;
+  const batchSize = mlConfig.batchSize;
+  const timeoutMs = mlConfig.timeoutMs;
+  const maxRetries = mlConfig.maxRetries;
 
-  try {
-    const mlResponse = await fetch(`${mlUrl}/internal/forecasts`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': mlApiKey,
-      },
-      body: JSON.stringify({
-        products: mlProducts,
-        horizon_days: 7,
-        feature_schema_version: '1.0',
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
+  const batches = [];
+  for (let i = 0; i < mlProducts.length; i += batchSize) {
+    batches.push(mlProducts.slice(i, i + batchSize));
+  }
 
-    if (mlResponse.ok) {
-      forecastData = await mlResponse.json();
+  const predictionMap = new Map();
+  let failedBatchesCount = 0;
+  let activeModelVersion = 'BASELINE-v1.0';
+
+  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+    const batch = batches[bIdx];
+    let batchSuccess = false;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const mlResponse = await fetch(`${mlUrl}/internal/forecasts`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key': mlApiKey,
+          },
+          body: JSON.stringify({
+            products: batch,
+            horizon_days: 7,
+            feature_schema_version: '2.0',
+          }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        if (mlResponse.ok) {
+          const batchData = await mlResponse.json();
+          if (batchData?.model_version) {
+            activeModelVersion = batchData.model_version;
+          }
+
+          if (Array.isArray(batchData?.predictions)) {
+            for (const item of batchData.predictions) {
+              if (item?.product_id && item.status === 'success' && Array.isArray(item.predictions)) {
+                // Strict validation of predictions before persistence
+                const validPreds = item.predictions.filter(pred => 
+                  pred.target_date && 
+                  typeof pred.predicted_demand === 'number' && 
+                  isFinite(pred.predicted_demand) && 
+                  pred.predicted_demand >= 0
+                );
+
+                if (validPreds.length > 0) {
+                  predictionMap.set(item.product_id, {
+                    predictions: validPreds,
+                    method: item.method || 'MODEL_QUANTILE',
+                    stockout: item.stockout || null,
+                    status: 'success',
+                  });
+                }
+              }
+            }
+            batchSuccess = true;
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn(`[ML Service] Batch ${bIdx + 1}/${batches.length} attempt ${attempt + 1} failed: ${err.message}`);
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+        }
+      }
     }
-  } catch (err) {
-    console.warn('ML service call failed or timed out, applying baseline fallback:', err.message);
+
+    if (!batchSuccess) {
+      failedBatchesCount++;
+    }
   }
 
   const runId = `RUN-${Date.now()}`;
-  const modelVersion = forecastData?.model_version || 'BASELINE-v1.0';
-
-  // 6. Persist forecasts and generate replenishment recommendations
+  let modelForecastsCount = 0;
+  let fallbackForecastsCount = 0;
   let createdForecastsCount = 0;
   let createdRecommendationsCount = 0;
 
+  // 6. Persist forecasts and generate replenishment recommendations
   for (const product of products) {
     const inv = product.inventory[0];
     const policy = product.inventoryPolicies[0];
     const supplierProd = product.supplierProducts[0];
     const recent = salesMap[product.id] || [];
 
-    // Extract or compute 7-day predictions
     let productPreds = [];
     let forecastMethod = 'MODEL';
+    const mlProdResult = predictionMap.get(product.id);
 
-    const mlProdResult = forecastData?.predictions?.find(p => p.product_id === product.id);
-    if (mlProdResult && mlProdResult.status !== 'error' && mlProdResult.predictions?.length > 0) {
+    if (mlProdResult && mlProdResult.status === 'success' && mlProdResult.predictions.length > 0) {
       productPreds = mlProdResult.predictions;
       const validMethods = ['MODEL', 'MODEL_QUANTILE', 'BASELINE_MOVING_AVERAGE', 'BASELINE_DAY_OF_WEEK', 'INSUFFICIENT_DATA', 'FALLBACK'];
       forecastMethod = validMethods.includes(mlProdResult.method) ? mlProdResult.method : 'MODEL';
+      if (forecastMethod === 'MODEL' || forecastMethod === 'MODEL_QUANTILE') {
+        modelForecastsCount++;
+      } else {
+        fallbackForecastsCount++;
+      }
     } else {
-      // Fallback moving average
-      forecastMethod = 'BASELINE_MOVING_AVERAGE';
+      // Legitimate fallback moving average
       const totalSales = recent.reduce((s, v) => s + v, 0);
+      if (recent.length < 7) {
+        forecastMethod = 'INSUFFICIENT_DATA';
+      } else {
+        forecastMethod = 'BASELINE_MOVING_AVERAGE';
+      }
+      fallbackForecastsCount++;
+
       const avg = totalSales > 0 ? totalSales / recent.length : 1;
-      const roundedAvg = Math.max(0, Math.round(avg * 10) / 10);
-      for (let d = 1; d <= 7; d++) {
+      for (let i = 1; i <= 7; i++) {
         const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() + d);
+        targetDate.setUTCDate(targetDate.getUTCDate() + i);
+        targetDate.setUTCHours(0, 0, 0, 0);
         productPreds.push({
-          target_date: targetDate.toISOString().split('T')[0],
-          predicted_demand: roundedAvg,
+          target_date: targetDate.toISOString(),
+          predicted_demand: Math.round(avg * 10) / 10,
+          demand_p50: Math.round(avg * 10) / 10,
+          demand_p90: Math.round(avg * 15) / 10,
+          demand_p95: Math.round(avg * 18) / 10,
         });
       }
     }
@@ -385,6 +467,17 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     for (const pred of productPreds) {
       const targetDate = new Date(pred.target_date);
       targetDate.setUTCHours(0, 0, 0, 0);
+
+      const p50 = pred.demand_p50 !== undefined ? Number(pred.demand_p50) : Number(pred.predicted_demand);
+      const p90 = pred.demand_p90 !== undefined ? Number(pred.demand_p90) : null;
+      const p95 = pred.demand_p95 !== undefined ? Number(pred.demand_p95) : null;
+      const stockoutProb = mlProdResult?.stockout?.probability_within_lead_time !== undefined
+        ? Number(mlProdResult.stockout.probability_within_lead_time)
+        : null;
+      const dos = mlProdResult?.stockout?.days_of_supply !== undefined
+        ? Number(mlProdResult.stockout.days_of_supply)
+        : null;
+      const stockoutRisk = mlProdResult?.stockout?.risk_level || null;
 
       await prisma.forecast.upsert({
         where: {
@@ -402,12 +495,24 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
           horizonDays: 7,
           runId,
           predictedDemand: pred.predicted_demand,
-          modelVersion,
+          predictedDemandP50: p50,
+          predictedDemandP90: p90,
+          predictedDemandP95: p95,
+          stockoutProbability: stockoutProb,
+          daysOfSupply: dos,
+          stockoutRiskLevel: stockoutRisk,
+          modelVersion: activeModelVersion,
           forecastMethod,
         },
         update: {
           predictedDemand: pred.predicted_demand,
-          modelVersion,
+          predictedDemandP50: p50,
+          predictedDemandP90: p90,
+          predictedDemandP95: p95,
+          stockoutProbability: stockoutProb,
+          daysOfSupply: dos,
+          stockoutRiskLevel: stockoutRisk,
+          modelVersion: activeModelVersion,
           forecastMethod,
         },
       });
@@ -431,6 +536,18 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     const protectionPeriod = leadTimeDays + reviewPeriod;
     const protectionDemand = dailyDemand * protectionPeriod;
     const targetStock = Math.ceil(protectionDemand + safetyStock);
+    const reorderPoint = Math.ceil((dailyDemand * leadTimeDays) + safetyStock);
+    const deficit = targetStock - inventoryPosition;
+
+    const stockoutProb = mlProdResult?.stockout?.probability_within_lead_time !== undefined
+      ? Number(mlProdResult.stockout.probability_within_lead_time)
+      : null;
+    const dos = mlProdResult?.stockout?.days_of_supply !== undefined
+      ? Number(mlProdResult.stockout.days_of_supply)
+      : null;
+
+    // Authoritative risk level persisted directly to DB
+    const riskLevel = determineRiskLevel(stockoutProb, dos, deficit, safetyStock);
 
     const rawSuggestedQty = Math.max(0, targetStock - inventoryPosition);
     let finalSuggestedQty = 0;
@@ -466,9 +583,13 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
           targetStock,
           rawSuggestedQty,
           finalSuggestedQty,
+          reorderPoint,
+          stockoutProbability: stockoutProb,
+          daysOfSupply: dos,
+          riskLevel,
           constraintsApplied: { minOrderQty, packMultiple, leadTimeDays, reviewPeriod },
           explanation,
-          modelVersion,
+          modelVersion: activeModelVersion,
           forecastMethod,
           calculatedAt: new Date(),
         },
@@ -486,9 +607,13 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
           targetStock,
           rawSuggestedQty,
           finalSuggestedQty,
+          reorderPoint,
+          stockoutProbability: stockoutProb,
+          daysOfSupply: dos,
+          riskLevel,
           constraintsApplied: { minOrderQty, packMultiple, leadTimeDays, reviewPeriod },
           explanation,
-          modelVersion,
+          modelVersion: activeModelVersion,
           forecastMethod,
           status: 'PENDING',
         },
@@ -497,14 +622,51 @@ router.post('/recalculate', requireRole('ADMIN', 'MANAGER'), validate(recalculat
     createdRecommendationsCount++;
   }
 
+  const allBatchesFailed = batches.length > 0 && failedBatchesCount === batches.length;
+  const isPartialSuccess = modelForecastsCount > 0 && (failedBatchesCount > 0 || fallbackForecastsCount > 0);
+  const runStatus = (products.length > 0 && createdForecastsCount === 0)
+    ? 'FAILED'
+    : allBatchesFailed
+      ? 'FALLBACK_ONLY'
+      : isPartialSuccess
+        ? 'PARTIAL_SUCCESS'
+        : modelForecastsCount === 0
+          ? 'FALLBACK_ONLY'
+          : 'SUCCESS';
+
+  if (runStatus === 'FAILED') {
+    return res.status(502).json({
+      error: 'Recalculation failed to generate forecasts or recommendations',
+      runId,
+      runStatus: 'FAILED',
+      storeId: targetStoreId,
+      productsProcessed: products.length,
+      modelForecastsCount: 0,
+      fallbackForecastsCount: 0,
+      failedBatchesCount,
+      forecastsGenerated: 0,
+      recommendationsGenerated: 0,
+    });
+  }
+
+  const message = runStatus === 'SUCCESS'
+    ? 'Recalculation completed successfully'
+    : runStatus === 'PARTIAL_SUCCESS'
+      ? 'Recalculation completed with partial ML coverage'
+      : 'ML forecasting service unavailable; baseline fallbacks applied';
+
   res.json({
-    message: 'Recalculation completed successfully',
+    message,
     runId,
+    runStatus,
     storeId: targetStoreId,
     productsProcessed: products.length,
+    modelForecastsCount,
+    fallbackForecastsCount,
+    failedBatchesCount,
     forecastsGenerated: createdForecastsCount,
     recommendationsGenerated: createdRecommendationsCount,
-    modelVersion,
+    modelVersion: activeModelVersion,
   });
 });
 
@@ -536,7 +698,7 @@ router.get('/forecasts', requireRole('ADMIN', 'MANAGER'), validate(forecastsQuer
       where,
       skip,
       take: limit,
-      orderBy: { targetDate: 'asc' },
+      orderBy: [{ targetDate: 'asc' }, { id: 'asc' }],
       include: {
         store: { select: { id: true, name: true } },
         product: { select: { id: true, name: true, sku: true } },
@@ -569,8 +731,7 @@ router.get('/slow-moving', requireRole('ADMIN', 'MANAGER'), validate(slowMovingQ
     ...(categoryId && { product: { categoryId } }),
   };
 
-  // Get products with no recent sales
-  const productsWithStock = await prisma.inventory.findMany({
+  const inventoryItems = await prisma.inventory.findMany({
     where,
     include: {
       product: { include: { category: true } },
@@ -578,20 +739,22 @@ router.get('/slow-moving', requireRole('ADMIN', 'MANAGER'), validate(slowMovingQ
     },
   });
 
-  // Check last sale date for each
   const slowMoving = [];
-  for (const inv of productsWithStock) {
-    const lastSale = await prisma.saleItem.findFirst({
+  for (const inv of inventoryItems) {
+    const recentSale = await prisma.saleItem.findFirst({
       where: {
         productId: inv.productId,
-        sale: { storeId, status: 'COMPLETED', createdAt: { gte: cutoffDate } },
+        sale: {
+          storeId,
+          status: 'COMPLETED',
+          createdAt: { gte: cutoffDate },
+        },
       },
-      orderBy: { sale: { createdAt: 'desc' } },
-      select: { sale: { select: { createdAt: true } } },
     });
 
-    if (!lastSale) {
+    if (!recentSale) {
       slowMoving.push({
+        id: inv.id,
         product: inv.product,
         store: inv.store,
         onHand: inv.quantityOnHand,
@@ -647,8 +810,9 @@ router.get('/expiry-risk', requireRole('ADMIN', 'MANAGER', 'INVENTORY_STAFF'), v
 });
 
 router.get('/model-info', requireRole('ADMIN', 'MANAGER'), async (req, res) => {
-  const mlUrl = process.env.ML_SERVICE_URL || 'http://localhost:8000';
-  const mlApiKey = process.env.ML_SERVICE_API_KEY || 'dev-ml-api-key';
+  const mlConfig = getMlConfig();
+  const mlUrl = mlConfig.url;
+  const mlApiKey = mlConfig.apiKey;
   try {
     const response = await fetch(`${mlUrl}/internal/model-info`, {
       headers: { 'X-API-Key': mlApiKey },
